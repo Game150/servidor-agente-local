@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Entorno virtual
+.venv/
+
+# Configuración local
+.env
+
+# Binarios locales de llama.cpp
+llama-b12292-bin-win-vulkan-x64/
+
+# Registros de ejecución
+logs/
