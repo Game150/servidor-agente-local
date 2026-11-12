@@ -4,6 +4,15 @@ API local para ejecutar modelos GGUF con [llama.cpp](https://github.com/ggml-org
 
 Esta guía está pensada para empezar en Windows. Los nombres de las rutas y algunos pasos pueden variar en otros sistemas.
 
+## Qué ofrece
+
+- Agentes configurados mediante YAML y ejecución local de modelos GGUF, sin Ollama.
+- Chat compatible con OpenAI, con respuestas normales o streaming.
+- Búsqueda opcional mediante SearXNG y skills locales que el modelo puede solicitar.
+- Avisos al acercarse al límite de contexto y registro del consumo de la última inferencia.
+
+Empieza por [Inicio rápido](#inicio-rápido); después puedes consultar [Búsqueda web](#búsqueda-web), [Skills locales](#skills-locales) y [Contexto y consumo](#contexto-y-consumo).
+
 ## Qué necesitas
 
 - Windows 11 de 64 bits.
@@ -192,7 +201,9 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8888/search?q=python&format=json"
 
 La API no instala ni inicia SearXNG. Sin una instancia accesible, el chat normal puede funcionar, pero las búsquedas que el modelo solicite fallarán.
 
-El servidor limita el número y tamaño de los resultados incorporados al contexto. Los trata como información externa no confiable, no como instrucciones.
+El servidor incorpora como máximo tres resultados y limita su tamaño. Los trata como información externa no confiable, no como instrucciones. Las búsquedas y cargas de skills comparten un máximo de tres llamadas y tres iteraciones de herramientas por solicitud.
+
+En streaming, si ocurre un error después de iniciar la respuesta, el estado HTTP ya puede ser `200`; el error se envía dentro del flujo SSE antes de `[DONE]`. Por eso, un `200 OK` en la consola no demuestra por sí solo que la búsqueda haya tenido éxito.
 
 ## Skills locales
 
@@ -254,6 +265,34 @@ Son fuentes para **descubrir y revisar**, no catálogos de skills garantizadas p
 Las skills se vuelven a leer en cada solicitud, por lo que copiar o editar una skill no requiere reiniciar la API. Sin embargo, cambiar `SKILLS_DIR` en `.env` sí requiere reiniciarla. Algunas skills externas indican que el agente lea archivos adicionales, use herramientas específicas o ejecute código: esas capacidades no las aporta este servidor, así que la skill puede requerir adaptación o no funcionar como espera su autor. Revisa también su licencia antes de copiarla o redistribuirla.
 
 Git ignora las skills locales agregadas dentro de `skills/`; el archivo de ejemplo `skills/explicar-codigo/SKILL.md` sí forma parte del proyecto. Las reglas de `.gitignore` no dejan de rastrear archivos que ya estén versionados.
+
+## Contexto y consumo
+
+El contexto es el espacio disponible para la entrada y la generación del modelo. Los mensajes, el archivo adjunto que el cliente envíe, las instrucciones del agente y los resultados de herramientas pueden ocupar parte de ese espacio. Los tokens de salida pueden incluir razonamiento, no solo el texto visible.
+
+### Avisos en la respuesta
+
+Al finalizar una respuesta de texto, la API puede añadir un aviso cuando el consumo informado por llama.cpp alcanza el **80 %** del contexto por slot, o un aviso más urgente desde el **95 %**. Funciona con y sin streaming. Por ejemplo:
+
+> ⚠️ Contexto cerca del límite (aproximadamente 80 %). Considera resumir la conversación o iniciar un chat nuevo.
+
+El cálculo usa `ctx_size / parallel` como referencia y suma entrada y generación de la inferencia final. Es aproximado: la configuración efectiva puede diferir si se alteran argumentos del motor. No se añade a respuestas JSON estructuradas, a llamadas de herramientas ni cuando faltan los datos necesarios. Tampoco garantiza avisar si el motor rechaza una solicitud demasiado grande antes de generar la respuesta.
+
+### Cómo leer el log
+
+Al terminar la respuesta, la consola puede mostrar una línea como esta, sin incluir la conversación:
+
+```text
+INFO:     Consumo de inferencia final: entrada=700 salida=100 total=800 contexto_por_slot=16384 ocupacion=4.9% motivo=stop
+```
+
+- `entrada` incluye los tokens del prompt; `salida`, los generados por el motor.
+- `total` es el consumo informado para la última inferencia. Si hubo llamadas a herramientas, no suma por separado todas las inferencias intermedias.
+- `contexto_por_slot` y `ocupacion` sirven como referencia aproximada.
+- `motivo=stop` indica una finalización normal; `motivo=length` señala que la generación terminó por un límite y puede explicar una respuesta cortada, aunque no demuestra que se haya llenado el contexto.
+- Si llama.cpp no proporciona un dato, aparece `no disponible`. Los errores o cancelaciones pueden impedir que llegue la línea final.
+
+Si una respuesta queda cortada, consulta el motivo y prueba pedir una respuesta más corta o por partes. También puedes aumentar el límite de salida del cliente —por ejemplo, `maxTokens` en Continue— si hay espacio suficiente; el agente usa `max_tokens: 2048` por defecto y el cliente puede sobrescribirlo.
 
 ## Configura otro agente o modelo
 

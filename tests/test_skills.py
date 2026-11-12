@@ -95,9 +95,10 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("uvicorn.error", level="INFO") as registro:
             async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
                 respuesta = await main._completar_sin_stream(cliente, payload, catalogo)
-        self.assertEqual(registro.output, [
-            "INFO:uvicorn.error:Skill cargada: ejemplo (solicitada por el modelo)"
-        ])
+        self.assertIn(
+            "INFO:uvicorn.error:Skill cargada: ejemplo (solicitada por el modelo)",
+            registro.output,
+        )
         self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Listo")
         self.assertIn("Responde usando", peticiones[1]["messages"][-1]["content"])
         self.assertEqual(peticiones[1]["messages"][-1]["tool_call_id"], "call-1")
@@ -164,9 +165,10 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
                 salida = b"".join([fragmento async for fragmento in main._completar_con_stream(
                     cliente, payload, respuesta, catalogo
                 )])
-        self.assertEqual(registro.output, [
-            "INFO:uvicorn.error:Skill cargada: ejemplo (solicitada por el modelo)"
-        ])
+        self.assertIn(
+            "INFO:uvicorn.error:Skill cargada: ejemplo (solicitada por el modelo)",
+            registro.output,
+        )
         self.assertIn(b"Listo", salida)
         self.assertNotIn(b"cargar_skill", salida)
         self.assertEqual(salida.count(b"data: [DONE]"), 1)

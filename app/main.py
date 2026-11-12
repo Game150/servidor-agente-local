@@ -30,6 +30,78 @@ MAX_ITERACIONES_HERRAMIENTAS = 3
 MAX_LLAMADAS_HERRAMIENTAS = 3
 MAX_CARACTERES_ARGUMENTOS = 2_000
 
+
+def _aviso_contexto(tokens: int, contexto: int | None) -> str:
+    if not isinstance(contexto, int) or contexto <= 0 or tokens * 100 < contexto * 80:
+        return ""
+    if tokens * 100 >= contexto * 95:
+        nivel = "muy cerca"
+    else:
+        nivel = "cerca"
+    porcentaje = min(tokens * 100 // contexto, 100)
+    return (
+        f"\n\n⚠️ Contexto {nivel} del límite (aproximadamente {porcentaje} %). "
+        "Considera resumir la conversación o iniciar un chat nuevo."
+    )
+
+
+def _tokens_uso(datos: dict) -> int | None:
+    uso = datos.get("usage")
+    if isinstance(uso, dict):
+        total = uso.get("total_tokens")
+        if type(total) is int and total >= 0:
+            return total
+    tiempos = datos.get("timings")
+    if isinstance(tiempos, dict):
+        valores = [tiempos.get(clave) for clave in ("cache_n", "prompt_n", "predicted_n")]
+        if all(type(valor) is int and valor >= 0 for valor in valores):
+            return sum(valores)
+    return None
+
+
+def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> None:
+    uso = datos.get("usage")
+    tiempos = datos.get("timings")
+
+    def entero(valor):
+        return valor if type(valor) is int and valor >= 0 else None
+
+    entrada = salida = None
+    if isinstance(uso, dict):
+        entrada = entero(uso.get("prompt_tokens"))
+        salida = entero(uso.get("completion_tokens"))
+    if isinstance(tiempos, dict):
+        cache = entero(tiempos.get("cache_n"))
+        prompt = entero(tiempos.get("prompt_n"))
+        if entrada is None and cache is not None and prompt is not None:
+            entrada = cache + prompt
+        if salida is None:
+            salida = entero(tiempos.get("predicted_n"))
+
+    total = _tokens_uso(datos)
+    if total is None and entrada is not None and salida is not None:
+        total = entrada + salida
+    valor = lambda numero: str(numero) if numero is not None else "no disponible"
+    if total is not None and type(contexto) is int and contexto > 0:
+        ocupacion = f"{total * 100 / contexto:.1f}%"
+    else:
+        ocupacion = "no disponible"
+    motivo = motivo if motivo in ("stop", "length", "tool_calls", "content_filter") else "no disponible"
+    logger.info(
+        "Consumo de inferencia final: entrada=%s salida=%s total=%s contexto_por_slot=%s ocupacion=%s motivo=%s",
+        valor(entrada), valor(salida), valor(total), valor(contexto), ocupacion, motivo,
+    )
+
+
+def _admite_aviso(payload: dict) -> bool:
+    formato = payload.get("response_format")
+    return (
+        payload.get("n", 1) == 1
+        and (formato is None or formato == {"type": "text"})
+        and not payload.get("grammar")
+        and not payload.get("json_schema")
+    )
+
 HERRAMIENTA_BUSQUEDA_WEB = {
     "type": "function",
     "function": {
@@ -434,6 +506,7 @@ async def _completar_sin_stream(
     cliente: httpx.AsyncClient,
     payload: dict,
     skills: dict | None = None,
+    contexto: int | None = None,
 ) -> Response:
     skills = skills or {}
     total_llamadas = 0
@@ -489,6 +562,20 @@ async def _completar_sin_stream(
 
         tool_calls = mensaje.get("tool_calls")
         if not tool_calls:
+            _registrar_consumo(datos, contexto, elecciones[0].get("finish_reason"))
+            tokens = _tokens_uso(datos)
+            if (
+                len(elecciones) == 1
+                and elecciones[0].get("finish_reason") in ("stop", "length")
+                and isinstance(mensaje.get("content"), str)
+                and mensaje["content"]
+                and tokens is not None
+                and _admite_aviso(payload)
+            ):
+                aviso = _aviso_contexto(tokens, contexto)
+                if aviso:
+                    mensaje["content"] += aviso
+                    cuerpo = json.dumps(datos, ensure_ascii=False).encode("utf-8")
             return Response(
                 content=cuerpo,
                 status_code=codigo,
@@ -504,6 +591,7 @@ async def _completar_sin_stream(
             or not _es_herramienta_interna(llamada, skills)
             for llamada in tool_calls
         ):
+            _registrar_consumo(datos, contexto, elecciones[0].get("finish_reason"))
             return Response(
                 content=cuerpo,
                 status_code=codigo,
@@ -746,7 +834,44 @@ async def _procesar_evento_stream(lineas: list[str], estado: dict):
         yield ("\n".join(lineas) + "\n\n").encode("utf-8")
         return
 
+    for clave in ("usage", "timings"):
+        if isinstance(datos.get(clave), dict):
+            estado.setdefault("metricas", {})[clave] = datos[clave]
     elecciones = datos.get("choices")
+    if isinstance(elecciones, list):
+        for eleccion in elecciones:
+            if isinstance(eleccion, dict) and eleccion.get("finish_reason") is not None:
+                estado["motivo"] = eleccion["finish_reason"]
+    if isinstance(elecciones, list) and len(elecciones) == 1:
+        eleccion = elecciones[0]
+        if isinstance(eleccion, dict):
+            delta = eleccion.get("delta")
+            if isinstance(delta, dict) and isinstance(delta.get("content"), str) and delta["content"]:
+                estado["contenido_emitido"] = True
+            tokens = _tokens_uso(datos)
+            if (
+                estado.get("contenido_emitido")
+                and not estado.get("vio_tool_calls")
+                and not (isinstance(delta, dict) and delta.get("tool_calls"))
+                and eleccion.get("finish_reason") in ("stop", "length")
+                and tokens is not None
+                and estado.get("admite_aviso")
+            ):
+                aviso = _aviso_contexto(tokens, estado.get("contexto"))
+                if aviso:
+                    if isinstance(delta, dict) and isinstance(delta.get("content"), str) and delta["content"]:
+                        datos["choices"][0]["delta"]["content"] += aviso
+                        yield _codificar_evento_sse(datos)
+                        return
+                    evento = {clave: datos[clave] for clave in (
+                        "id", "object", "created", "model", "system_fingerprint"
+                    ) if clave in datos}
+                    evento["choices"] = [{
+                        "index": eleccion.get("index", 0),
+                        "delta": {"content": aviso},
+                        "finish_reason": None,
+                    }]
+                    yield _codificar_evento_sse(evento)
     termina_con_llamada = isinstance(elecciones, list) and any(
         isinstance(eleccion, dict)
         and eleccion.get("finish_reason") == "tool_calls"
@@ -789,6 +914,7 @@ async def _completar_con_stream(
     payload: dict,
     respuesta: httpx.Response,
     skills: dict | None = None,
+    contexto: int | None = None,
 ):
     skills = skills or {}
     total_llamadas = 0
@@ -800,6 +926,9 @@ async def _completar_con_stream(
             "vio_tool_calls": False,
             "llamada_invalida": False,
             "skills": skills,
+            "contexto": contexto,
+            "admite_aviso": _admite_aviso(payload),
+            "contenido_emitido": False,
         }
 
         try:
@@ -814,6 +943,7 @@ async def _completar_con_stream(
 
         llamadas = estado.get("llamadas_internas")
         if not llamadas:
+            _registrar_consumo(estado.get("metricas", {}), contexto, estado.get("motivo"))
             return
 
         if iteracion == MAX_ITERACIONES_HERRAMIENTAS:
@@ -898,6 +1028,7 @@ async def completar_chat(request: Request, solicitud: dict):
     payload = construir_payload(agente, solicitud)
     skills = _preparar_skills(payload)
     _agregar_herramienta_busqueda(payload, skills)
+    contexto = agente["motor"]["ctx_size"] // agente["motor"]["parallel"]
 
     # Arranca o cambia de modelo si hace falta y reserva un lugar. Desde acá
     # hay que llamar siempre a coordinador.liberar().
@@ -907,7 +1038,7 @@ async def completar_chat(request: Request, solicitud: dict):
 
     if not solicitud.get("stream", False):
         try:
-            return await _completar_sin_stream(cliente, payload, skills)
+            return await _completar_sin_stream(cliente, payload, skills, contexto)
         finally:
             await coordinador.liberar()
 
@@ -946,6 +1077,7 @@ async def completar_chat(request: Request, solicitud: dict):
                     payload,
                     respuesta,
                     skills,
+                    contexto,
                 ):
                     yield fragmento
             finally:

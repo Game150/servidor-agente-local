@@ -431,7 +431,7 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
             "messages": [{"role": "user", "content": "Hola"}],
             "stream": True,
         }
-        agente = {"system_prompt": "Sistema", "parametros": {}}
+        agente = {"system_prompt": "Sistema", "parametros": {}, "motor": {"ctx_size": 8192, "parallel": 1}}
 
         try:
             with (
@@ -486,6 +486,7 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
                     return_value={
                         "system_prompt": "Sistema",
                         "parametros": {},
+                        "motor": {"ctx_size": 8192, "parallel": 1},
                     },
                 ),
                 patch("app.main._preparar_motor", new=AsyncMock()),
@@ -526,7 +527,7 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
             "model": "desarrollador",
             "messages": [{"role": "user", "content": "Busca"}],
         }
-        agente = {"system_prompt": "Sistema", "parametros": {}}
+        agente = {"system_prompt": "Sistema", "parametros": {}, "motor": {"ctx_size": 8192, "parallel": 1}}
 
         try:
             with (

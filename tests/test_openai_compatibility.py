@@ -37,6 +37,7 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
         agente = {
             "id": "desarrollador",
             "system_prompt": "Responde de forma concisa.",
+            "motor": {"ctx_size": 8192, "parallel": 1},
             "parametros": {
                 "temperature": 0.3,
                 "top_p": 0.9,
@@ -169,6 +170,7 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
                         return_value={
                             "system_prompt": "Sistema",
                             "parametros": {},
+                            "motor": {"ctx_size": 8192, "parallel": 1},
                         },
                     ),
                     patch("app.main._preparar_motor", new=AsyncMock()),
