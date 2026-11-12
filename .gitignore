@@ -9,6 +9,12 @@ __pycache__/
 # Configuración local
 .env
 
+# Skills locales (se conserva el ejemplo del proyecto)
+/skills/*
+!/skills/explicar-codigo/
+/skills/explicar-codigo/*
+!/skills/explicar-codigo/SKILL.md
+
 # Binarios locales de llama.cpp
 llama-b12292-bin-win-vulkan-x64/
 
