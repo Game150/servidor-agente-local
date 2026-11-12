@@ -7,7 +7,7 @@ Esta guía está pensada para empezar en Windows. Los nombres de las rutas y alg
 ## Qué necesitas
 
 - Windows 11 de 64 bits.
-- Python 3.13 o superior.
+- Python 3.13 (versión utilizada en las pruebas; otras versiones no se han verificado).
 - `llama-server` de llama.cpp y un modelo compatible en formato GGUF.
 - Una GPU compatible con Vulkan es opcional; acelera la generación si tu compilación y tu equipo la admiten.
 - Para búsquedas web: una instancia SearXNG accesible desde el equipo.
@@ -27,7 +27,7 @@ cd servidor-agente-local
 
 ### 2. Coloca llama.cpp y el modelo
 
-Descarga una compilación de llama.cpp para Windows que incluya `llama-server.exe`. Extrae la carpeta dentro de la carpeta del proyecto; su nombre debe empezar por `llama`, por ejemplo:
+Descarga una compilación de [llama.cpp para Windows](https://github.com/ggml-org/llama.cpp/releases) que incluya `llama-server.exe`. Extrae la carpeta dentro de la carpeta del proyecto; su nombre debe empezar por `llama`, por ejemplo:
 
 ```text
 servidor-agente-local/
@@ -44,7 +44,7 @@ Crea la carpeta `models` y coloca dentro el archivo `.gguf` que quieras usar:
 New-Item -ItemType Directory -Force .\models
 ```
 
-El agente incluido está configurado para un archivo llamado `qwen3.5-4b-Q4_K_M.gguf`. Si usas otro modelo, cambia el campo `modelo` en `config/agentes/desarrollador.yaml` por el nombre del archivo sin `.gguf`.
+El proyecto no incluye el modelo: debes conseguir y descargar por separado un GGUF compatible. El agente incluido está configurado para un archivo llamado `qwen3.5-4b-Q4_K_M.gguf`. Si el archivo descargado tiene otro nombre, cambia el campo `modelo` en `config/agentes/desarrollador.yaml` por el nombre del archivo sin `.gguf`.
 
 ### 3. Prepara la configuración
 
@@ -69,9 +69,10 @@ SEARXNG_URL=http://127.0.0.1:8888
 - `LLAMA_SERVER_PATH`: opcional. Déjalo vacío si el ejecutable está dentro de una carpeta `llama*` del proyecto o en el `PATH`.
 - `LLAMA_HOST` y `LLAMA_PORT`: dirección interna de llama.cpp. Déjalos como están salvo que necesites cambiarla.
 - `API_KEY`: opcional para uso local. Si la defines, todos los endpoints salvo `/` requieren el encabezado `Authorization: Bearer TU_CLAVE`. Usa una clave propia y no compartas ni subas `.env`.
-- `SEARXNG_URL`: dirección base de tu instancia SearXNG, sin `/search`. La búsqueda web requiere que SearXNG esté disponible y permita respuestas JSON. El valor de ejemplo debe reemplazarse si SearXNG no está en ese equipo.
+- `SEARXNG_URL`: dirección base de tu instancia SearXNG, sin `/search`. El valor mostrado arriba es un **ejemplo** para una instancia en el mismo equipo; debes añadirlo o descomentarlo en `.env` y ajustarlo. Si no lo defines, el código usa `http://192.168.10.254:8888`, una dirección de red local que probablemente no corresponda a tu instalación.
 
 El servidor y llama.cpp escuchan en `127.0.0.1` por defecto; así solo aceptan conexiones locales.
+Reinicia la API después de cambiar `.env`; se lee al iniciar el proceso. Las variables de entorno ya definidas en el sistema tienen prioridad sobre `.env`.
 
 ### 4. Instala las dependencias de Python
 
@@ -183,7 +184,74 @@ Para probarlo desde tu cliente, intenta:
 
 La búsqueda requiere que `SEARXNG_URL` apunte a una instancia activa y accesible. Además, la versión de llama.cpp y la plantilla de chat incluida en el modelo deben admitir tool calling. La compatibilidad puede variar entre modelos y clientes; si el modelo no invoca la herramienta, revisa sus registros y configuración.
 
+Si administras SearXNG, verifica que `json` esté habilitado en `search.formats` junto a los formatos que necesites. Consulta la [configuración de búsqueda de SearXNG](https://docs.searxng.org/admin/settings/settings_search.html). Puedes comprobar tu instancia desde PowerShell, reemplazando la dirección por la tuya:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8888/search?q=python&format=json"
+```
+
+La API no instala ni inicia SearXNG. Sin una instancia accesible, el chat normal puede funcionar, pero las búsquedas que el modelo solicite fallarán.
+
 El servidor limita el número y tamaño de los resultados incorporados al contexto. Los trata como información externa no confiable, no como instrucciones.
+
+## Skills locales
+
+Las skills son instrucciones reutilizables para tareas específicas; no necesitan npm. El servidor busca carpetas con un archivo `SKILL.md` dentro de `skills/`. Incluye `skills/explicar-codigo/SKILL.md` como ejemplo. Puedes cambiar la carpeta raíz mediante `SKILLS_DIR` en `.env`.
+
+Para crear una skill, añade una carpeta cuyo nombre coincida con `name`:
+
+```text
+skills/
+└── revisar-codigo/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: revisar-codigo
+description: Revisa código y busca errores cuando el usuario pide una revisión.
+---
+
+# Revisar código
+
+Comprueba el comportamiento y explica los problemas encontrados con evidencia.
+```
+
+El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo el nombre y la descripción; puede decidir cargar las instrucciones con `cargar_skill`, tanto en streaming como sin streaming. Puedes pedirle en el chat «usa la skill revisar-codigo», aunque la decisión sigue dependiendo del modelo y su soporte para tool calling.
+
+Para seleccionar una skill de forma explícita desde una integración propia, agrega el campo opcional `skills` al JSON de `POST /v1/chat/completions`:
+
+```json
+{
+  "model": "desarrollador",
+  "messages": [{"role": "user", "content": "Revisa este código"}],
+  "skills": ["revisar-codigo"]
+}
+```
+
+Este campo es una extensión propia de la API, no parte del formato estándar OpenAI; los clientes que no permitan campos personalizados pueden usar la selección automática. Se admiten hasta tres nombres explícitos. Si falta una skill seleccionada o un `SKILL.md` es inválido, la solicitud devuelve un error.
+
+Solo se carga el contenido de `SKILL.md`; no se ejecutan scripts ni se leen automáticamente archivos de `scripts/`, `references/` o `assets/`. Esto es un subconjunto del formato [Agent Skills](https://agentskills.io/specification), no una implementación completa. Instala solo skills de confianza: sus instrucciones pasan al modelo.
+
+Al cargar instrucciones de una skill, la consola del servidor muestra `Skill cargada: nombre`, indicando si la solicitó el modelo o se seleccionó explícitamente. No se registra el contenido de la skill ni la conversación. La presencia de una skill en el catálogo, por sí sola, no genera este mensaje.
+
+### Dónde conseguir skills
+
+- [Agent Skills](https://agentskills.io/home): explicación del formato y [especificación](https://agentskills.io/specification) para crear o revisar una skill.
+- [Anthropic Skills](https://github.com/anthropics/skills/tree/main/skills): colección de ejemplos organizados en carpetas con `SKILL.md`. Están pensados para Claude y algunas skills necesitan otras funciones que este servidor no tiene.
+- [OpenAI Plugins](https://github.com/openai/plugins): ejemplos de plugins de Codex, algunos con carpetas de skills. Están diseñados para Codex y pueden depender de sus herramientas o integraciones.
+- [skills.sh](https://skills.sh/): directorio para descubrir skills de distintos autores. Comprueba el repositorio de origen: su presencia en el directorio no garantiza seguridad ni compatibilidad.
+
+Son fuentes para **descubrir y revisar**, no catálogos de skills garantizadas para este servidor. Los instaladores o comandos de otros agentes no instalan automáticamente skills en este proyecto; no necesitas npm para usarlas aquí.
+
+### Cómo instalar una skill encontrada
+
+1. Abre su repositorio de origen y revisa `SKILL.md`, la licencia y los requisitos. Usa solo contenido de confianza: las instrucciones influyen en las respuestas del modelo.
+2. Descarga el repositorio o la carpeta de la skill y copia esa carpeta a `skills/` dentro de este proyecto. Por ejemplo, `skills/mi-skill/SKILL.md`, **sin una carpeta extra entre `skills/` y `mi-skill/`**.
+3. Comprueba que `name` coincida exactamente con `mi-skill`, que haya `description` y texto de instrucciones, y que el archivo esté codificado en UTF-8. El servidor admite hasta 50 skills y cada `SKILL.md` puede ocupar hasta 32.000 bytes. El nombre tiene un máximo de 64 caracteres y la descripción, de 1.024.
+4. Pide una tarea relacionada desde tu cliente y observa la consola. La carga automática depende de la decisión del modelo; si quieres probarla, menciona su nombre. Un log `Skill cargada` confirma que se incorporaron sus instrucciones, no que la respuesta sea correcta.
+
+Las skills se vuelven a leer en cada solicitud, por lo que copiar o editar una skill no requiere reiniciar la API. Sin embargo, cambiar `SKILLS_DIR` en `.env` sí requiere reiniciarla. Algunas skills externas indican que el agente lea archivos adicionales, use herramientas específicas o ejecute código: esas capacidades no las aporta este servidor, así que la skill puede requerir adaptación o no funcionar como espera su autor. Revisa también su licencia antes de copiarla o redistribuirla.
 
 ## Configura otro agente o modelo
 
@@ -239,6 +307,7 @@ Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicit
 - **Error 401:** configura la misma clave en `.env` y en la aplicación cliente, con el prefijo `Bearer`.
 - **Error de conexión desde una extensión:** verifica que Uvicorn siga activo, que la URL use el puerto `8000` y que la extensión tenga permiso para conectarse a `127.0.0.1`.
 - **Falla la búsqueda web:** comprueba que SearXNG esté en ejecución, que `SEARXNG_URL` sea accesible desde este equipo y que su búsqueda responda en JSON.
+- **Error al cargar una skill:** revisa la carpeta y el mensaje de error: cualquier `SKILL.md` inválido puede hacer que falle la solicitud. Comprueba los campos, el nombre, la codificación y los límites explicados arriba.
 - **El modelo no usa la herramienta:** confirma que el cliente envíe solicitudes a `/v1/chat/completions` y que el modelo, la plantilla de chat y la configuración del cliente admitan tool calling.
 - **El primer mensaje tarda:** normalmente el modelo se está cargando. Consulta `GET /engine/status` y el archivo `logs/llama-server.log`.
 

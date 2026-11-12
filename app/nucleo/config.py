@@ -59,6 +59,7 @@ def _ruta(nombre: str, defecto: Path) -> Path:
 
 MODELS_DIR = _ruta("MODELS_DIR", BASE_DIR / "models")
 AGENTS_DIR = _ruta("AGENTS_DIR", BASE_DIR / "config" / "agentes")
+SKILLS_DIR = _ruta("SKILLS_DIR", BASE_DIR / "skills")
 LOG_DIR = _ruta("LOG_DIR", BASE_DIR / "logs")
 LOG_MAX_BYTES = _entero("LOG_MAX_BYTES", 5 * 1024 * 1024)
 

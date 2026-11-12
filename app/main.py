@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import secrets
 from contextlib import asynccontextmanager
 
@@ -20,8 +21,10 @@ from app.servicios.motor_inferencia import motor
 from app.servicios.payload import construir_payload
 from app.servicios.registro_agentes import listar_agentes, obtener_agente
 from app.servicios.registro_modelos import listar_modelos
+from app.servicios.skills import listar_skills
 
 coordinador = Coordinador(motor)
+logger = logging.getLogger("uvicorn.error")
 
 MAX_ITERACIONES_HERRAMIENTAS = 3
 MAX_LLAMADAS_HERRAMIENTAS = 3
@@ -45,6 +48,20 @@ HERRAMIENTA_BUSQUEDA_WEB = {
                 }
             },
             "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+HERRAMIENTA_SKILL = {
+    "type": "function",
+    "function": {
+        "name": "cargar_skill",
+        "description": "Carga las instrucciones de una skill local por su nombre cuando sea relevante.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Nombre de la skill."}},
+            "required": ["name"],
             "additionalProperties": False,
         },
     },
@@ -240,7 +257,7 @@ def _error_motor(codigo: int, cuerpo: bytes) -> JSONResponse:
     return _respuesta_error(codigo, cuerpo.decode("utf-8", errors="replace"))
 
 
-def _agregar_herramienta_busqueda(payload: dict) -> None:
+def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> None:
     herramientas = payload.get("tools", [])
     if herramientas is None:
         herramientas = []
@@ -254,13 +271,108 @@ def _agregar_herramienta_busqueda(payload: dict) -> None:
 
         funcion = herramienta.get("function")
 
-        if isinstance(funcion, dict) and funcion.get("name") == "buscar_en_web":
+        if isinstance(funcion, dict) and (
+            funcion.get("name") == "buscar_en_web"
+            or (skills and funcion.get("name") == "cargar_skill")
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="El nombre de herramienta buscar_en_web esta reservado.",
+                detail=f"El nombre de herramienta {funcion['name']} esta reservado.",
             )
 
-    payload["tools"] = [*herramientas, HERRAMIENTA_BUSQUEDA_WEB]
+    internas = [HERRAMIENTA_SKILL] if skills else []
+    payload["tools"] = [*herramientas, *internas, HERRAMIENTA_BUSQUEDA_WEB]
+
+
+def _preparar_skills(payload: dict) -> dict:
+    seleccion = payload.pop("skills", [])
+    if (
+        not isinstance(seleccion, list)
+        or len(seleccion) > 3
+        or any(not isinstance(nombre, str) or not nombre for nombre in seleccion)
+        or len(set(seleccion)) != len(seleccion)
+    ):
+        raise HTTPException(status_code=400, detail="skills debe ser una lista de hasta 3 nombres distintos.")
+    try:
+        skills = listar_skills()
+    except ValueError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    for nombre in seleccion:
+        if nombre not in skills:
+            raise HTTPException(status_code=400, detail=f"No existe la skill: {nombre}")
+    if skills:
+        catalogo = "\n".join(
+            f"- {nombre}: {skill['description']}" for nombre, skill in skills.items()
+        )
+        payload["messages"][0]["content"] += (
+            "\n\nSkills locales disponibles. Usa cargar_skill cuando una sea relevante:\n" + catalogo
+        )
+    for nombre in seleccion:
+        payload["messages"][0]["content"] += (
+            f"\n\nInstrucciones de la skill {nombre}:\n{skills[nombre]['content']}"
+        )
+        logger.info("Skill cargada: %s (seleccion explicita)", nombre)
+    return skills
+
+
+def _es_herramienta_interna(llamada: dict, skills: dict) -> bool:
+    funcion = llamada.get("function")
+    return isinstance(funcion, dict) and (
+        funcion.get("name") == "buscar_en_web"
+        or (bool(skills) and funcion.get("name") == "cargar_skill")
+    )
+
+
+async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, skills: dict) -> list:
+    validadas = []
+    identificadores = set()
+    for llamada in llamadas:
+        if not isinstance(llamada, dict) or not _es_herramienta_interna(llamada, skills):
+            raise HTTPException(status_code=502, detail="El modelo devolvio una herramienta invalida.")
+        funcion = llamada["function"]
+        if funcion["name"] == "buscar_en_web":
+            identificador, argumento = _validar_llamadas_busqueda([llamada])[0]
+        else:
+            identificador = llamada.get("id")
+            argumentos = funcion.get("arguments")
+            if (
+                llamada.get("type") != "function"
+                or not isinstance(identificador, str)
+                or not identificador
+                or len(identificador) > 128
+                or not isinstance(argumentos, str)
+                or len(argumentos) > MAX_CARACTERES_ARGUMENTOS
+            ):
+                raise HTTPException(status_code=502, detail="La llamada a cargar_skill es invalida.")
+            try:
+                datos = json.loads(argumentos)
+            except json.JSONDecodeError as error:
+                raise HTTPException(status_code=502, detail="Los argumentos de cargar_skill no contienen JSON valido.") from error
+            if (
+                not isinstance(datos, dict)
+                or set(datos) != {"name"}
+                or not isinstance(datos["name"], str)
+                or datos["name"] not in skills
+            ):
+                raise HTTPException(status_code=502, detail="La skill solicitada no existe o es invalida.")
+            argumento = datos["name"]
+        if identificador in identificadores:
+            raise HTTPException(status_code=502, detail="Identificador de herramienta duplicado.")
+        identificadores.add(identificador)
+        validadas.append((identificador, funcion["name"], argumento))
+
+    mensajes = []
+    for identificador, nombre, argumento in validadas:
+        if nombre == "buscar_en_web":
+            try:
+                resultado = await buscar_en_searxng(cliente, argumento)
+            except (httpx.HTTPError, ValueError) as error:
+                raise HTTPException(status_code=502, detail="No se pudo completar la busqueda web en SearXNG.") from error
+        else:
+            resultado = skills[argumento]["content"]
+            logger.info("Skill cargada: %s (solicitada por el modelo)", argumento)
+        mensajes.append({"role": "tool", "tool_call_id": identificador, "content": resultado})
+    return mensajes
 
 
 def _validar_llamadas_busqueda(tool_calls: list) -> list[tuple[str, str]]:
@@ -321,7 +433,9 @@ def _validar_llamadas_busqueda(tool_calls: list) -> list[tuple[str, str]]:
 async def _completar_sin_stream(
     cliente: httpx.AsyncClient,
     payload: dict,
+    skills: dict | None = None,
 ) -> Response:
+    skills = skills or {}
     total_llamadas = 0
 
     for iteracion in range(MAX_ITERACIONES_HERRAMIENTAS + 1):
@@ -387,8 +501,7 @@ async def _completar_sin_stream(
         if any(
             not isinstance(llamada, dict)
             or llamada.get("type") != "function"
-            or not isinstance(llamada.get("function"), dict)
-            or llamada["function"].get("name") != "buscar_en_web"
+            or not _es_herramienta_interna(llamada, skills)
             for llamada in tool_calls
         ):
             return Response(
@@ -403,34 +516,17 @@ async def _completar_sin_stream(
                 detail="El modelo supero el limite de iteraciones de herramientas.",
             )
 
-        llamadas = _validar_llamadas_busqueda(tool_calls)
-        if total_llamadas + len(llamadas) > MAX_LLAMADAS_HERRAMIENTAS:
+        if total_llamadas + len(tool_calls) > MAX_LLAMADAS_HERRAMIENTAS:
             raise HTTPException(
                 status_code=502,
-                detail="El modelo supero el limite de busquedas por solicitud.",
+                detail="El modelo supero el limite de llamadas de herramientas por solicitud.",
             )
 
-        mensajes_herramienta = []
-        for identificador, query in llamadas:
-            try:
-                resultado = await buscar_en_searxng(cliente, query)
-            except (httpx.HTTPError, ValueError) as error:
-                raise HTTPException(
-                    status_code=502,
-                    detail="No se pudo completar la busqueda web en SearXNG.",
-                ) from error
-
-            mensajes_herramienta.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": identificador,
-                    "content": resultado,
-                }
-            )
+        mensajes_herramienta = await _ejecutar_herramientas(cliente, tool_calls, skills)
 
         payload["messages"].append(mensaje)
         payload["messages"].extend(mensajes_herramienta)
-        total_llamadas += len(llamadas)
+        total_llamadas += len(tool_calls)
 
     raise HTTPException(status_code=502, detail="El modelo no completo la solicitud.")
 
@@ -613,8 +709,7 @@ async def _iterar_eventos_stream(respuesta: httpx.Response, estado: dict):
         return
 
     if llamadas and all(
-        isinstance(llamada.get("function"), dict)
-        and llamada["function"].get("name") == "buscar_en_web"
+        _es_herramienta_interna(llamada, estado.get("skills", {}))
         for llamada in llamadas
     ):
         estado["llamadas_internas"] = llamadas
@@ -693,7 +788,9 @@ async def _completar_con_stream(
     cliente: httpx.AsyncClient,
     payload: dict,
     respuesta: httpx.Response,
+    skills: dict | None = None,
 ):
+    skills = skills or {}
     total_llamadas = 0
 
     for iteracion in range(MAX_ITERACIONES_HERRAMIENTAS + 1):
@@ -702,6 +799,7 @@ async def _completar_con_stream(
             "eventos_retenidos": [],
             "vio_tool_calls": False,
             "llamada_invalida": False,
+            "skills": skills,
         }
 
         try:
@@ -725,34 +823,15 @@ async def _completar_con_stream(
             )
             return
 
+        if total_llamadas + len(llamadas) > MAX_LLAMADAS_HERRAMIENTAS:
+            yield _error_sse(502, "El modelo supero el limite de llamadas de herramientas por solicitud.")
+            return
+
         try:
-            llamadas_validadas = _validar_llamadas_busqueda(llamadas)
+            mensajes_herramienta = await _ejecutar_herramientas(cliente, llamadas, skills)
         except HTTPException as error:
             yield _error_sse(error.status_code, str(error.detail))
             return
-
-        if total_llamadas + len(llamadas_validadas) > MAX_LLAMADAS_HERRAMIENTAS:
-            yield _error_sse(502, "El modelo supero el limite de busquedas por solicitud.")
-            return
-
-        mensajes_herramienta = []
-        for identificador, query in llamadas_validadas:
-            try:
-                resultado = await buscar_en_searxng(cliente, query)
-            except (httpx.HTTPError, ValueError) as error:
-                yield _error_sse(
-                    502,
-                    "No se pudo completar la busqueda web en SearXNG.",
-                )
-                return
-
-            mensajes_herramienta.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": identificador,
-                    "content": resultado,
-                }
-            )
 
         payload["messages"].append(
             {
@@ -761,7 +840,7 @@ async def _completar_con_stream(
             }
         )
         payload["messages"].extend(mensajes_herramienta)
-        total_llamadas += len(llamadas_validadas)
+        total_llamadas += len(llamadas)
 
         try:
             peticion = cliente.build_request(
@@ -817,8 +896,8 @@ async def completar_chat(request: Request, solicitud: dict):
             detail="Debes proporcionar una lista de mensajes.",
         )
     payload = construir_payload(agente, solicitud)
-    payload = construir_payload(agente, solicitud)
-    _agregar_herramienta_busqueda(payload)
+    skills = _preparar_skills(payload)
+    _agregar_herramienta_busqueda(payload, skills)
 
     # Arranca o cambia de modelo si hace falta y reserva un lugar. Desde acá
     # hay que llamar siempre a coordinador.liberar().
@@ -828,7 +907,7 @@ async def completar_chat(request: Request, solicitud: dict):
 
     if not solicitud.get("stream", False):
         try:
-            return await _completar_sin_stream(cliente, payload)
+            return await _completar_sin_stream(cliente, payload, skills)
         finally:
             await coordinador.liberar()
 
@@ -866,6 +945,7 @@ async def completar_chat(request: Request, solicitud: dict):
                     cliente,
                     payload,
                     respuesta,
+                    skills,
                 ):
                     yield fragmento
             finally:
