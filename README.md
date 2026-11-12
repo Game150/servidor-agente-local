@@ -1,197 +1,259 @@
 # Servidor de Agentes Locales
 
-API local para administrar agentes de inteligencia artificial y ejecutar modelos GGUF mediante [llama.cpp](https://github.com/ggml-org/llama.cpp).
+API local para ejecutar modelos GGUF con [llama.cpp](https://github.com/ggml-org/llama.cpp) y conectarlos a clientes compatibles con la API de OpenAI. FastAPI administra los agentes y las solicitudes; no necesitas Ollama.
 
-El proyecto utiliza FastAPI como capa de administración y comunicación, mientras que llama.cpp se encarga de la inferencia. Permite conectar clientes externos compatibles con la API de OpenAI, como CodeGPT, utilizando agentes configurados localmente.
+Esta guía está pensada para empezar en Windows. Los nombres de las rutas y algunos pasos pueden variar en otros sistemas.
 
-## Funcionamiento
-
-El servidor se divide en tres componentes principales:
-
-- **FastAPI:** expone los endpoints para administrar modelos, agentes y el motor de inferencia. También proporciona una API compatible con OpenAI.
-- **llama.cpp:** ejecuta los modelos GGUF y procesa las solicitudes de generación de texto.
-- **Configuración de agentes:** define mediante archivos YAML el modelo que utiliza cada agente, sus instrucciones de sistema y sus parámetros de generación.
-
-Cada agente funciona como un perfil independiente. Esto permite utilizar diferentes instrucciones y configuraciones sin tener que modificar el motor de inferencia.
-
-El servidor administra el ciclo de vida de llama.cpp, permitiendo iniciar el modelo seleccionado y detenerlo cuando ya no se necesita. Al cerrar FastAPI normalmente, el motor también se detiene.
-
-## Requisitos
+## Qué necesitas
 
 - Windows 11 de 64 bits.
-- Python 3.13 o superior compatible con las dependencias.
-- llama.cpp para Windows con soporte Vulkan.
-- Modelos GGUF compatibles.
-- GPU compatible con Vulkan (opcional, pero recomendada para aceleración por hardware).
+- Python 3.13 o superior.
+- `llama-server` de llama.cpp y un modelo compatible en formato GGUF.
+- Una GPU compatible con Vulkan es opcional; acelera la generación si tu compilación y tu equipo la admiten.
+- Para búsquedas web: una instancia SearXNG accesible desde el equipo.
 
-## Estructura del proyecto
+> Los modelos GGUF pueden ocupar varios GB. Comprueba que tienes espacio en disco y memoria suficientes para el modelo elegido.
 
-```text
-servidor-agente-local/
-├── app/
-│   ├── nucleo/
-│   │   └── config.py
-│   ├── servicios/
-│   │   ├── registro_modelos.py
-│   │   ├── registro_agentes.py
-│   │   └── motor_inferencia.py
-│   └── main.py
-├── config/
-│   └── agentes/
-│       └── desarrollador.yaml
-├── logs/
-├── requirements.txt
-├── .gitignore
-└── LICENSE
-```
+## Inicio rápido
 
-## Instalación
+### 1. Descarga el proyecto
 
-Clonar el repositorio:
+Abre PowerShell y ejecuta:
 
 ```powershell
 git clone https://github.com/Game150/servidor-agente-local.git
 cd servidor-agente-local
 ```
 
-Crear y activar un entorno virtual:
+### 2. Coloca llama.cpp y el modelo
+
+Descarga una compilación de llama.cpp para Windows que incluya `llama-server.exe`. Extrae la carpeta dentro de la carpeta del proyecto; su nombre debe empezar por `llama`, por ejemplo:
+
+```text
+servidor-agente-local/
+├── llama-b12292-bin-win-vulkan-x64/
+│   └── llama-server.exe
+└── ...
+```
+
+También puedes guardar `llama-server.exe` en el `PATH` o indicar su ubicación exacta en `LLAMA_SERVER_PATH`, en el archivo `.env`.
+
+Crea la carpeta `models` y coloca dentro el archivo `.gguf` que quieras usar:
+
+```powershell
+New-Item -ItemType Directory -Force .\models
+```
+
+El agente incluido está configurado para un archivo llamado `qwen3.5-4b-Q4_K_M.gguf`. Si usas otro modelo, cambia el campo `modelo` en `config/agentes/desarrollador.yaml` por el nombre del archivo sin `.gguf`.
+
+### 3. Prepara la configuración
+
+Crea tu archivo `.env` local:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Abre `.env` y revisa estos valores:
+
+```env
+MODELS_DIR=models
+LLAMA_SERVER_PATH=
+LLAMA_HOST=127.0.0.1
+LLAMA_PORT=8080
+API_KEY=
+SEARXNG_URL=http://127.0.0.1:8888
+```
+
+- `MODELS_DIR`: carpeta con tus archivos `.gguf`. Acepta una ruta absoluta, por ejemplo `D:\Modelos`, además de `models`.
+- `LLAMA_SERVER_PATH`: opcional. Déjalo vacío si el ejecutable está dentro de una carpeta `llama*` del proyecto o en el `PATH`.
+- `LLAMA_HOST` y `LLAMA_PORT`: dirección interna de llama.cpp. Déjalos como están salvo que necesites cambiarla.
+- `API_KEY`: opcional para uso local. Si la defines, todos los endpoints salvo `/` requieren el encabezado `Authorization: Bearer TU_CLAVE`. Usa una clave propia y no compartas ni subas `.env`.
+- `SEARXNG_URL`: dirección base de tu instancia SearXNG, sin `/search`. La búsqueda web requiere que SearXNG esté disponible y permita respuestas JSON. El valor de ejemplo debe reemplazarse si SearXNG no está en ese equipo.
+
+El servidor y llama.cpp escuchan en `127.0.0.1` por defecto; así solo aceptan conexiones locales.
+
+### 4. Instala las dependencias de Python
+
+Desde la carpeta del proyecto:
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Instalar las dependencias:
+No hace falta activar el entorno virtual.
+
+### 5. Arranca el servidor
+
+Haz doble clic en `iniciar-servidor.bat`, o ejecuta desde PowerShell:
 
 ```powershell
-pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### Configuración de llama.cpp
+Deja abierta la ventana mientras uses la API. Para detenerla, pulsa `Ctrl+C`.
 
-Descargar una compilación de llama.cpp para Windows con soporte Vulkan y extraerla en la raíz del proyecto, utilizando el siguiente nombre de directorio:
+Comprueba que está activo:
 
-```text
-llama-b12292-bin-win-vulkan-x64/
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/
 ```
 
-El ejecutable `llama-server.exe` debe quedar dentro de ese directorio.
+La documentación interactiva de FastAPI está en <http://127.0.0.1:8000/docs>.
 
-### Configuración de modelos
+### 6. Envía un mensaje de prueba
 
-Por defecto, el servidor busca modelos GGUF en:
+El identificador del agente incluido es `desarrollador`. La primera conversación inicia el agente y carga su modelo automáticamente; no es necesario iniciar el motor por separado.
 
-```text
-\\192.168.10.254\Home-Server\LLMs
+```powershell
+$headers = @{}
+# Si configuraste API_KEY en .env, descomenta la siguiente línea y reemplaza el valor:
+# $headers.Authorization = "Bearer TU_CLAVE"
+
+$body = @{
+  model = "desarrollador"
+  messages = @(@{ role = "user"; content = "Responde únicamente: API lista" })
+  stream = $false
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/chat/completions `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
 ```
 
-La ubicación puede modificarse mediante la variable de entorno `MODELS_DIR`.
+La primera respuesta puede tardar mientras se carga el modelo. Las siguientes reutilizan el proceso activo.
 
-Es necesario que el equipo tenga acceso al directorio donde se almacenan los modelos.
+## Conecta una aplicación cliente
 
-## Configuración de agentes
+La API ofrece los endpoints `GET /v1/models` y `POST /v1/chat/completions`. No implementa todas las rutas ni todas las funciones de cada proveedor compatible con OpenAI.
 
-Los agentes se definen mediante archivos YAML dentro de `config/agentes/`.
+Usa estos valores en clientes que acepten un proveedor OpenAI-compatible:
 
-Ejemplo de configuración:
+| Campo | Valor |
+|---|---|
+| URL base | `http://127.0.0.1:8000/v1` |
+| Modelo | `desarrollador` |
+| API key | La misma clave de `API_KEY`, si configuraste una |
+
+Si un cliente pide la URL completa de completions en lugar de la URL base, usa `http://127.0.0.1:8000/v1/chat/completions`.
+
+### Continue
+
+En el archivo `config.yaml` de Continue, puedes configurar un modelo así:
+
+```yaml
+name: Servidor Agente Local
+version: 1.0.0
+schema: v1
+models:
+  - name: Agente Desarrollador local
+    provider: openai
+    model: desarrollador
+    apiBase: http://127.0.0.1:8000/v1
+    apiKey: local
+    roles:
+      - chat
+```
+
+Si definiste `API_KEY`, cambia `apiKey: local` por la misma clave. Si la dejaste vacía, puedes quitar la línea `apiKey`.
+
+Empieza probando el chat normal. El uso de herramientas desde modos agente depende también de la versión y configuración de Continue.
+
+### Extensiones de Chrome
+
+La extensión debe permitir configurar un endpoint OpenAI-compatible y conectarse a servicios locales. Usa los valores de la tabla anterior; si solicita la URL completa, usa la ruta `/v1/chat/completions`. Concede a la extensión el permiso de acceder al servidor local si Chrome lo solicita.
+
+Chrome por sí solo no envía mensajes a esta API: necesitas una extensión que admita endpoints personalizados. Otras extensiones pueden tener requisitos distintos; consulta su documentación.
+
+## Búsqueda web
+
+El agente puede decidir si necesita buscar información externa usando la herramienta `buscar_en_web`. El flujo funciona con solicitudes normales y con streaming:
+
+1. El modelo solicita una búsqueda.
+2. El servidor consulta SearXNG.
+3. Los resultados se agregan a la conversación y el modelo prepara la respuesta.
+
+Para probarlo desde tu cliente, intenta:
+
+> Busca en la web la versión estable más reciente de Python. Usa fuentes oficiales e incluye la versión, la fecha de publicación y los enlaces. No respondas de memoria.
+
+La búsqueda requiere que `SEARXNG_URL` apunte a una instancia activa y accesible. Además, la versión de llama.cpp y la plantilla de chat incluida en el modelo deben admitir tool calling. La compatibilidad puede variar entre modelos y clientes; si el modelo no invoca la herramienta, revisa sus registros y configuración.
+
+El servidor limita el número y tamaño de los resultados incorporados al contexto. Los trata como información externa no confiable, no como instrucciones.
+
+## Configura otro agente o modelo
+
+Los agentes son archivos YAML dentro de `config/agentes/`. El campo `id` es el nombre que envía el cliente como `model`; el campo `modelo` debe coincidir con el nombre de un archivo `.gguf` dentro de `MODELS_DIR`, sin la extensión.
+
+Ejemplo mínimo:
 
 ```yaml
 id: desarrollador
 nombre: Agente Desarrollador
-descripcion: Asistente especializado en programación y desarrollo de software.
+descripcion: Asistente de desarrollo.
 
-modelo: qwen2.5-coder-7b-instruct-q4_k_m
+modelo: qwen3.5-4b-Q4_K_M
 
 system_prompt: |
-  Eres un asistente especializado en desarrollo de software.
   Responde en español, de forma clara y directa.
 
 parametros:
   temperature: 0.3
   top_p: 0.9
   max_tokens: 2048
+  forzar: false
+
+motor:
+  ctx_size: 16384
+  gpu_layers: 99
+  parallel: 1
 ```
 
-El campo `modelo` debe coincidir con el nombre de un archivo GGUF disponible en el directorio de modelos, sin su extensión.
+Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF para crear otros agentes.
 
-## Ejecución
-
-Iniciar la aplicación desde la raíz del proyecto:
-
-```powershell
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-La API quedará disponible en:
-
-```text
-http://127.0.0.1:8000
-```
-
-La documentación interactiva de FastAPI se encuentra en:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### Iniciar un agente
-
-Por defecto, el motor de inferencia permanece detenido hasta que se solicita iniciar un agente.
-
-Para iniciar el agente `desarrollador`, realizar una petición:
-
-```http
-POST http://127.0.0.1:8000/agents/desarrollador/start
-```
-
-El servidor localizará el modelo correspondiente y ejecutará llama.cpp.
-
-Una vez iniciado, los clientes podrán enviar solicitudes de generación de texto.
-
-### Conectar un cliente externo
-
-Para utilizar CodeGPT u otro cliente compatible con OpenAI, configurar:
-
-| Parámetro | Valor |
-|---|---|
-| Proveedor | OpenAI Compatible |
-| Base URL | `http://127.0.0.1:8000/v1` |
-| Modelo | `desarrollador` |
-| API Key | No requerida actualmente |
-
-El cliente utilizará las instrucciones y parámetros definidos en el archivo YAML del agente.
-
-### Detener el motor
-
-Para detener el modelo sin cerrar la aplicación:
-
-```http
-POST http://127.0.0.1:8000/engine/stop
-```
-
-También es posible consultar su estado:
-
-```http
-GET http://127.0.0.1:8000/engine/status
-```
-
-Al finalizar el uso de la aplicación, presionar `Ctrl + C` en la consola de Uvicorn. El cierre normal de FastAPI también detendrá el motor de inferencia.
-
-## API disponible
+## Endpoints disponibles
 
 | Método | Endpoint | Función |
 |---|---|---|
-| GET | `/models` | Listar modelos GGUF |
-| GET | `/agents` | Listar agentes |
-| GET | `/agents/{agent_id}` | Consultar un agente |
-| GET | `/v1/models` | Listar agentes para clientes OpenAI |
-| POST | `/agents/{agent_id}/start` | Iniciar un agente |
+| GET | `/` | Comprobar que la API está activa |
+| GET | `/models` | Listar archivos GGUF disponibles |
+| GET | `/agents` | Listar agentes configurados |
+| GET | `/agents/{agent_id}` | Consultar la configuración de un agente |
+| GET | `/v1/models` | Listar agentes para clientes OpenAI-compatible |
+| POST | `/agents/{agent_id}/start` | Precargar un agente (opcional) |
 | GET | `/engine/status` | Consultar el estado del motor |
-| POST | `/engine/stop` | Detener el motor |
-| POST | `/v1/chat/completions` | Generar respuestas |
+| POST | `/engine/stop` | Detener el modelo activo |
+| POST | `/v1/chat/completions` | Generar una respuesta; admite streaming |
 
-## Estado del proyecto
+Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicitudes, excepto a `GET /`.
 
-Proyecto en desarrollo. La implementación inicial permite registrar agentes mediante YAML, administrar modelos GGUF con llama.cpp y exponer una API compatible con OpenAI para su utilización desde aplicaciones externas.
+## Solución de problemas
 
-Las funcionalidades y la documentación se ampliarán a medida que avance el desarrollo.
+- **La API no arranca:** confirma que instalaste las dependencias en `.venv` y que el puerto `8000` está libre.
+- **No encuentra llama.cpp:** comprueba que `llama-server.exe` esté en una carpeta `llama*`, en el `PATH` o en la ruta indicada por `LLAMA_SERVER_PATH`.
+- **No aparece el agente o modelo:** consulta `GET /agents` y `GET /models`. Revisa que el valor `modelo` del YAML coincida con el nombre del GGUF y que `MODELS_DIR` apunte a la carpeta correcta.
+- **Error 401:** configura la misma clave en `.env` y en la aplicación cliente, con el prefijo `Bearer`.
+- **Error de conexión desde una extensión:** verifica que Uvicorn siga activo, que la URL use el puerto `8000` y que la extensión tenga permiso para conectarse a `127.0.0.1`.
+- **Falla la búsqueda web:** comprueba que SearXNG esté en ejecución, que `SEARXNG_URL` sea accesible desde este equipo y que su búsqueda responda en JSON.
+- **El modelo no usa la herramienta:** confirma que el cliente envíe solicitudes a `/v1/chat/completions` y que el modelo, la plantilla de chat y la configuración del cliente admitan tool calling.
+- **El primer mensaje tarda:** normalmente el modelo se está cargando. Consulta `GET /engine/status` y el archivo `logs/llama-server.log`.
+
+## Rendimiento
+
+Los parámetros del bloque `motor` permiten ajustar el uso de recursos:
+
+- `ctx_size`: tamaño del contexto. Aumentarlo consume más memoria.
+- `gpu_layers`: cantidad de capas que llama.cpp intenta ejecutar en la GPU. `99` intenta descargar tantas como sea posible.
+- `parallel`: cantidad de solicitudes que el motor puede atender en paralelo; más paralelismo puede consumir más memoria y reducir el contexto disponible por solicitud.
+
+Cambia un valor por vez y compara el resultado. No hay una configuración óptima universal: depende del modelo, su cuantización y el hardware.
+
+## Seguridad y alcance
+
+Por defecto, la API solo escucha en `127.0.0.1`, es decir, en el propio equipo. No la expongas directamente a Internet. Si configuras `API_KEY`, usa una clave privada y evita compartir el archivo `.env`.
+
+El proyecto está en desarrollo. Su compatibilidad OpenAI se limita a los endpoints descritos en esta guía.

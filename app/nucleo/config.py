@@ -68,6 +68,13 @@ LLAMA_HOST = os.getenv("LLAMA_HOST", "127.0.0.1").strip() or "127.0.0.1"
 LLAMA_PORT = _entero("LLAMA_PORT", 8080)
 LLAMA_URL = f"http://{LLAMA_HOST}:{LLAMA_PORT}"
 
+# --- Busqueda web ---------------------------------------------------------
+
+SEARXNG_URL = (
+    os.getenv("SEARXNG_URL", "http://192.168.10.254:8888").strip().rstrip("/")
+    or "http://192.168.10.254:8888"
+)
+
 # Segundos que se espera a que llama-server termine de cargar el modelo.
 STARTUP_TIMEOUT = _entero("STARTUP_TIMEOUT", 180)
 
