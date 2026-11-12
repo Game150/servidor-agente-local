@@ -11,7 +11,24 @@ system_prompt: |
   No inventes información ni supongas detalles que no conoces.
   Explica los cambios importantes antes de proponer modificaciones.
 
+# Parámetros de generación. Son valores por defecto: si el cliente envía los
+# suyos (temperature, top_p, max_tokens...) prevalecen, salvo que pongas
+# `forzar: true`. También se aceptan top_k, min_p, repeat_penalty, etc.
 parametros:
   temperature: 0.3
   top_p: 0.9
   max_tokens: 2048
+  forzar: false
+
+# Configuración de llama-server para este agente (todo opcional).
+# Estos son los valores por defecto. Si dos agentes usan el mismo modelo con
+# la misma configuración comparten el proceso; si difiere algo, se reinicia.
+motor:
+  ctx_size: 16384      # contexto total; se reparte entre los slots (parallel)
+  gpu_layers: 99        # capas en GPU (99 = todas las que entren)
+  parallel: 1           # peticiones simultáneas
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+  # flash_attn: "auto"  # on | off | auto (entre comillas)
+  # threads: 8
+  # extra_args: ["--jinja"]
