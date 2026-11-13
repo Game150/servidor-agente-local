@@ -30,6 +30,48 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
             "Responde usando la instruccion de ejemplo.\n",
             encoding="utf-8",
         )
+        anterior = getattr(main.app.state, "catalogo_skills", None)
+        main.app.state.catalogo_skills = ("ejemplo",)
+        self.addCleanup(setattr, main.app.state, "catalogo_skills", anterior)
+
+    async def test_registra_catalogo_al_iniciar(self):
+        with patch.object(main.motor, "detener"):
+            with self.assertLogs("uvicorn.error", level="INFO") as registro:
+                async with main.lifespan(main.app):
+                    pass
+        self.assertIn("INFO:uvicorn.error:Skills disponibles: ejemplo", registro.output)
+        self.assertNotIn("Responde usando", "\n".join(registro.output))
+
+    async def test_catalogo_invalido_no_impide_arrancar(self):
+        (self.raiz / "ejemplo" / "SKILL.md").write_text("invalida", encoding="utf-8")
+        with patch.object(main.motor, "detener"):
+            with self.assertLogs("uvicorn.error", level="WARNING") as registro:
+                async with main.lifespan(main.app):
+                    pass
+        self.assertIn("No se pudo listar las skills locales", "\n".join(registro.output))
+
+    def test_registra_cambios_del_catalogo_sin_repetirlo(self):
+        carpeta = self.raiz / "otra"
+        carpeta.mkdir()
+        (carpeta / "SKILL.md").write_text(
+            "---\nname: otra\ndescription: Otra skill.\n---\nInstrucciones.\n",
+            encoding="utf-8",
+        )
+        payload = {"messages": [{"role": "system", "content": ""}]}
+        with patch.object(main.logger, "info") as registro:
+            main._preparar_skills(payload)
+            main._preparar_skills({"messages": [{"role": "system", "content": ""}]})
+            (carpeta / "SKILL.md").unlink()
+            main._preparar_skills({"messages": [{"role": "system", "content": ""}]})
+        self.assertEqual(registro.call_count, 2)
+        self.assertEqual(registro.call_args_list[0].args, ("Skills disponibles: %s", "ejemplo, otra"))
+        self.assertEqual(registro.call_args_list[1].args, ("Skills disponibles: %s", "ejemplo"))
+
+    def test_registra_catalogo_vacio(self):
+        (self.raiz / "ejemplo" / "SKILL.md").unlink()
+        with self.assertLogs("uvicorn.error", level="INFO") as registro:
+            main._preparar_skills({"messages": [{"role": "system", "content": ""}]})
+        self.assertIn("INFO:uvicorn.error:Skills disponibles: (ninguna)", registro.output)
 
     def test_descubre_y_carga_instrucciones_solo_al_seleccionar(self):
         payload = {"messages": [{"role": "system", "content": "Sistema"}]}
@@ -102,6 +144,33 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Listo")
         self.assertIn("Responde usando", peticiones[1]["messages"][-1]["content"])
         self.assertEqual(peticiones[1]["messages"][-1]["tool_call_id"], "call-1")
+
+    async def test_skill_inexistente_permite_recuperarse_sin_stream(self):
+        catalogo = skills.listar_skills()
+        peticiones = []
+
+        def responder(request):
+            peticiones.append(json.loads(request.content))
+            if len(peticiones) == 1:
+                return httpx.Response(200, json={"choices": [{"message": {
+                    "role": "assistant", "tool_calls": [{
+                        "id": "call-1", "type": "function",
+                        "function": {"name": "cargar_skill", "arguments": '{"name":"desconocida"}'},
+                    }],
+                }}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Skill no disponible"}}]})
+
+        payload = {"messages": [{"role": "system", "content": ""}]}
+        main._agregar_herramienta_busqueda(payload, catalogo)
+        with self.assertLogs("uvicorn.error", level="WARNING") as registro:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+                respuesta = await main._completar_sin_stream(cliente, payload, catalogo)
+        self.assertIn("Skill solicitada no disponible", "\n".join(registro.output))
+        self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Skill no disponible")
+        resultado = peticiones[1]["messages"][-1]
+        self.assertEqual(resultado["tool_call_id"], "call-1")
+        self.assertIn("Error", resultado["content"])
+        self.assertIn("ejemplo", resultado["content"])
 
     async def test_endpoint_seleccion_explicita_no_reenvia_campo_a_llama(self):
         peticiones = []
@@ -200,12 +269,43 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
                     await main._ejecutar_herramientas(cliente, llamadas, catalogo)
                 buscar.assert_not_awaited()
 
-    async def test_errores_de_skill_en_stream_terminan_con_done(self):
+    async def test_skill_inexistente_permite_recuperarse_con_stream(self):
         catalogo = skills.listar_skills()
         primer_stream = b"".join([
             evento({"choices": [{"index": 0, "delta": {"tool_calls": [{
                 "index": 0, "id": "call-1", "type": "function",
                 "function": {"name": "cargar_skill", "arguments": '{"name":"desconocida"}'},
+            }]}, "finish_reason": None}]}),
+            evento({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+            b"data: [DONE]\n\n",
+        ])
+        respuesta = httpx.Response(200, stream=httpx.ByteStream(primer_stream))
+        peticiones = []
+        final = evento({"choices": [{"index": 0, "delta": {"content": "Skill no disponible"}, "finish_reason": "stop"}]}) + b"data: [DONE]\n\n"
+
+        def responder(request):
+            peticiones.append(json.loads(request.content))
+            return httpx.Response(200, stream=httpx.ByteStream(final))
+
+        with self.assertLogs("uvicorn.error", level="WARNING"):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+                salida = b"".join([fragmento async for fragmento in main._completar_con_stream(
+                    cliente, {"messages": []}, respuesta, catalogo
+                )])
+        self.assertIn(b"Skill no disponible", salida)
+        self.assertNotIn(b'"error"', salida)
+        self.assertEqual(salida.count(b"data: [DONE]"), 1)
+        resultado = peticiones[0]["messages"][-1]
+        self.assertEqual(resultado["tool_call_id"], "call-1")
+        self.assertIn("Error", resultado["content"])
+        self.assertIn("ejemplo", resultado["content"])
+
+    async def test_skill_con_nombre_invalido_en_stream_termina_con_error(self):
+        catalogo = skills.listar_skills()
+        primer_stream = b"".join([
+            evento({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "type": "function",
+                "function": {"name": "cargar_skill", "arguments": '{"name":"../ejemplo"}'},
             }]}, "finish_reason": None}]}),
             evento({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
             b"data: [DONE]\n\n",

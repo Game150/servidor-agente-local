@@ -17,7 +17,14 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
         main.app.dependency_overrides.update(self.overrides)
 
     async def test_models_lists_configured_agent_ids(self):
-        agentes = [{"id": "desarrollador"}, {"id": "revisor"}]
+        agentes = [
+            {
+                "id": nombre,
+                "motor": {"ctx_size": 8192, "parallel": 2},
+                "parametros": {"max_tokens": 256},
+            }
+            for nombre in ("desarrollador", "revisor")
+        ]
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=main.app),
@@ -32,6 +39,8 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
             [modelo["id"] for modelo in respuesta.json()["data"]],
             ["desarrollador", "revisor"],
         )
+        self.assertEqual(respuesta.json()["data"][0]["context_length"], 4096)
+        self.assertEqual(respuesta.json()["data"][0]["max_tokens"], 256)
 
     async def test_chat_completion_routes_agent_and_preserves_openai_response(self):
         agente = {

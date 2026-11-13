@@ -21,7 +21,7 @@ from app.servicios.motor_inferencia import motor
 from app.servicios.payload import construir_payload
 from app.servicios.registro_agentes import listar_agentes, obtener_agente
 from app.servicios.registro_modelos import listar_modelos
-from app.servicios.skills import listar_skills
+from app.servicios.skills import NOMBRE_SKILL, listar_skills
 
 coordinador = Coordinador(motor)
 logger = logging.getLogger("uvicorn.error")
@@ -144,6 +144,12 @@ HERRAMIENTA_SKILL = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.catalogo_skills = None
+    try:
+        _registrar_catalogo_skills(app, listar_skills())
+    except (OSError, ValueError) as error:
+        logger.warning("No se pudo listar las skills locales: %s", error)
+
     # Un único cliente HTTP compartido. trust_env=False evita que un proxy del
     # sistema intercepte las llamadas a localhost.
     app.state.http = httpx.AsyncClient(
@@ -297,6 +303,10 @@ def obtener_agente_por_id(agent_id: str):
     return _agente_o_error(agent_id)
 
 
+def _contexto_por_slot(agente: dict) -> int:
+    return agente["motor"]["ctx_size"] // agente["motor"]["parallel"]
+
+
 @protegido.get("/v1/models")
 def listar_modelos_api():
     return {
@@ -307,6 +317,9 @@ def listar_modelos_api():
                 "object": "model",
                 "created": 0,
                 "owned_by": "servidor-agente-local",
+                "context_length": _contexto_por_slot(agente),
+                "max_model_len": _contexto_por_slot(agente),
+                "max_tokens": agente["parametros"]["max_tokens"],
             }
             for agente in _agentes_o_error()
         ],
@@ -356,6 +369,13 @@ def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> 
     payload["tools"] = [*herramientas, *internas, HERRAMIENTA_BUSQUEDA_WEB]
 
 
+def _registrar_catalogo_skills(aplicacion: FastAPI, skills: dict) -> None:
+    nombres = tuple(sorted(skills))
+    if getattr(aplicacion.state, "catalogo_skills", None) != nombres:
+        logger.info("Skills disponibles: %s", ", ".join(nombres) if nombres else "(ninguna)")
+        aplicacion.state.catalogo_skills = nombres
+
+
 def _preparar_skills(payload: dict) -> dict:
     seleccion = payload.pop("skills", [])
     if (
@@ -369,6 +389,7 @@ def _preparar_skills(payload: dict) -> dict:
         skills = listar_skills()
     except ValueError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+    _registrar_catalogo_skills(app, skills)
     for nombre in seleccion:
         if nombre not in skills:
             raise HTTPException(status_code=400, detail=f"No existe la skill: {nombre}")
@@ -377,7 +398,9 @@ def _preparar_skills(payload: dict) -> dict:
             f"- {nombre}: {skill['description']}" for nombre, skill in skills.items()
         )
         payload["messages"][0]["content"] += (
-            "\n\nSkills locales disponibles. Usa cargar_skill cuando una sea relevante:\n" + catalogo
+            "\n\nSkills locales disponibles. Este es el catalogo completo; usa cargar_skill "
+            "solo con un nombre exacto de la lista cuando sea relevante. No inventes "
+            "skills ni busques en la web para descubrirlas:\n" + catalogo
         )
     for nombre in seleccion:
         payload["messages"][0]["content"] += (
@@ -424,7 +447,8 @@ async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, ski
                 not isinstance(datos, dict)
                 or set(datos) != {"name"}
                 or not isinstance(datos["name"], str)
-                or datos["name"] not in skills
+                or len(datos["name"]) > 64
+                or not NOMBRE_SKILL.fullmatch(datos["name"])
             ):
                 raise HTTPException(status_code=502, detail="La skill solicitada no existe o es invalida.")
             argumento = datos["name"]
@@ -440,6 +464,13 @@ async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, ski
                 resultado = await buscar_en_searxng(cliente, argumento)
             except (httpx.HTTPError, ValueError) as error:
                 raise HTTPException(status_code=502, detail="No se pudo completar la busqueda web en SearXNG.") from error
+        elif argumento not in skills:
+            logger.warning("Skill solicitada no disponible en el catalogo local.")
+            resultado = (
+                "Error: la skill solicitada no esta disponible. "
+                "Nombres disponibles: " + ", ".join(skills) +
+                ". Usa solo nombres exactos del catalogo."
+            )
         else:
             resultado = skills[argumento]["content"]
             logger.info("Skill cargada: %s (solicitada por el modelo)", argumento)
@@ -1028,7 +1059,7 @@ async def completar_chat(request: Request, solicitud: dict):
     payload = construir_payload(agente, solicitud)
     skills = _preparar_skills(payload)
     _agregar_herramienta_busqueda(payload, skills)
-    contexto = agente["motor"]["ctx_size"] // agente["motor"]["parallel"]
+    contexto = _contexto_por_slot(agente)
 
     # Arranca o cambia de modelo si hace falta y reserva un lugar. Desde acá
     # hay que llamar siempre a coordinador.liberar().

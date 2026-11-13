@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -19,6 +20,8 @@ from app.nucleo.config import (
     resolver_llama_server,
 )
 from app.servicios.registro_modelos import buscar_modelo
+
+logger = logging.getLogger("uvicorn.error")
 
 # Opener sin proxy: nunca hay que pasar por un proxy para hablar con localhost.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -156,8 +159,21 @@ class MotorInferencia:
                 }
 
             self._detener_proceso()
+            inicio = time.monotonic()
+            logger.info(
+                "Cargando modelo %s (agente=%s, ctx=%s)",
+                agente["modelo"],
+                agente["id"],
+                agente["motor"].get("ctx_size"),
+            )
             self._lanzar(agente)
             self._esperar_listo()
+            logger.info(
+                "Modelo cargado: %s (agente=%s, %.1f s)",
+                agente["modelo"],
+                agente["id"],
+                time.monotonic() - inicio,
+            )
 
             return {
                 "mensaje": "Motor de inferencia iniciado.",
@@ -295,6 +311,9 @@ class MotorInferencia:
     def detener(self) -> dict:
         """Detiene el motor. No espera a `_op`: puede cancelar un arranque."""
         habia = self._detener_proceso()
+
+        if habia:
+            logger.info("Motor detenido por solicitud.")
 
         return {
             "mensaje": (

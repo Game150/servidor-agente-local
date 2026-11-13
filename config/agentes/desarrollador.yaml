@@ -20,11 +20,11 @@ system_prompt: |
 parametros:
   temperature: 0.3
   top_p: 0.9
-  max_tokens: 2048
+  max_tokens: 4096
   forzar: false
 
 motor:
-  ctx_size: 16384
+  ctx_size: 32768
   gpu_layers: 99
   parallel: 1
   cache_type_k: q8_0

@@ -167,9 +167,28 @@ models:
     apiKey: local
     roles:
       - chat
+    defaultCompletionOptions:
+      contextLength: 32768
+      maxTokens: 4096
 ```
 
 Si definiste `API_KEY`, cambia `apiKey: local` por la misma clave. Si la dejaste vacía, puedes quitar la línea `apiKey`.
+El ejemplo corresponde al agente `desarrollador`: si cambias su contexto o su límite de salida, ajusta también estos valores en Continue.
+
+Para que Continue liste todos tus agentes sin escribirlos uno por uno, usa `model: AUTODETECT`. Continue consulta `/v1/models` y muestra cada agente de `config/agentes/` como un modelo seleccionable:
+
+```yaml
+models:
+  - name: Agentes locales
+    provider: openai
+    model: AUTODETECT
+    apiBase: http://127.0.0.1:8000/v1
+    apiKey: local
+    roles:
+      - chat
+```
+
+Al cambiar de agente en Continue, el servidor cambia de modelo y puede tardar unos segundos. El `contextLength` de Continue es único para todos; usa el valor del agente con menos contexto.
 
 Empieza probando el chat normal. El uso de herramientas desde modos agente depende también de la versión y configuración de Continue.
 
@@ -246,6 +265,10 @@ Solo se carga el contenido de `SKILL.md`; no se ejecutan scripts ni se leen auto
 
 Al cargar instrucciones de una skill, la consola del servidor muestra `Skill cargada: nombre`, indicando si la solicitó el modelo o se seleccionó explícitamente. No se registra el contenido de la skill ni la conversación. La presencia de una skill en el catálogo, por sí sola, no genera este mensaje.
 
+Al iniciar, la consola también muestra los nombres en `Skills disponibles`; si no hay ninguna, indica `(ninguna)`. Si agregas o quitas skills, el catálogo se vuelve a registrar en la siguiente solicitud, sin repetirlo cuando no cambia. Si el catálogo es inválido al arrancar, aparece una advertencia; las solicitudes informan el error hasta corregirlo.
+
+Si el modelo solicita un nombre válido que no está en el catálogo, el servidor registra una advertencia y le devuelve el error y los nombres disponibles para que pueda corregirse. Las llamadas malformadas siguen devolviendo un error. La recuperación depende del modelo y de los límites de llamadas a herramientas.
+
 ### Dónde conseguir skills
 
 - [Agent Skills](https://agentskills.io/home): explicación del formato y [especificación](https://agentskills.io/specification) para crear o revisar una skill.
@@ -313,11 +336,11 @@ system_prompt: |
 parametros:
   temperature: 0.3
   top_p: 0.9
-  max_tokens: 2048
+  max_tokens: 4096
   forzar: false
 
 motor:
-  ctx_size: 16384
+  ctx_size: 32768
   gpu_layers: 99
   parallel: 1
 ```
