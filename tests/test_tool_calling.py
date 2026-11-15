@@ -1,13 +1,15 @@
 import asyncio
 import json
+import threading
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from fastapi import HTTPException
 from starlette.requests import Request
 
 from app import main
+from app.servicios.coordinador import Coordinador
 
 
 def respuesta_herramienta(nombre="buscar_en_web", argumentos='{"query":"novedades"}'):
@@ -34,6 +36,76 @@ def evento_sse(datos):
 
 
 class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registra_busqueda_sin_consulta_ni_resultados(self):
+        llamada = respuesta_herramienta(argumentos='{"query":"consulta privada"}')["choices"][0]["message"]["tool_calls"]
+        async with httpx.AsyncClient() as cliente:
+            with (
+                patch("app.main.buscar_en_searxng", new=AsyncMock(return_value="resultado privado")),
+                self.assertLogs("uvicorn.error", level="INFO") as registro,
+            ):
+                await main._ejecutar_herramientas(cliente, llamada, {})
+        self.assertIn("Busqueda web iniciada", registro.output[0])
+        self.assertIn("Busqueda web completada", registro.output[1])
+        self.assertNotIn("privada", " ".join(registro.output))
+        self.assertNotIn("privado", " ".join(registro.output))
+
+    async def test_registra_fallo_de_busqueda_sin_datos_privados(self):
+        llamada = respuesta_herramienta(argumentos='{"query":"consulta privada"}')["choices"][0]["message"]["tool_calls"]
+        async with httpx.AsyncClient() as cliente:
+            with (
+                patch("app.main.buscar_en_searxng", new=AsyncMock(side_effect=httpx.ConnectError("dato privado"))),
+                self.assertLogs("uvicorn.error", level="INFO") as registro,
+                self.assertRaises(HTTPException) as error,
+            ):
+                await main._ejecutar_herramientas(cliente, llamada, {})
+        self.assertEqual(error.exception.status_code, 502)
+        self.assertIn("Busqueda web fallida", registro.output[1])
+        self.assertNotIn("privad", " ".join(registro.output))
+
+    def test_busqueda_desactivada_no_se_ofrece_ni_intercepta(self):
+        herramienta_cliente = {"type": "function", "function": {"name": "buscar_en_web"}}
+        payload = {"messages": [{"role": "user", "content": "Hola"}], "tools": [herramienta_cliente]}
+        llamada = respuesta_herramienta()["choices"][0]["message"]["tool_calls"][0]
+        with patch("app.main.WEB_SEARCH_ENABLED", False):
+            main._agregar_herramienta_busqueda(payload, {})
+            main._inyectar_herramientas(payload, {})
+            self.assertFalse(main._es_herramienta_interna(llamada, {}))
+        self.assertEqual(payload["tools"], [herramienta_cliente])
+        self.assertEqual(payload["messages"][0]["content"], "Hola")
+
+    def test_busqueda_desactivada_conserva_skills(self):
+        catalogo = {"ejemplo": {"description": "Instrucciones de ejemplo", "content": "Contenido"}}
+        payload = {"messages": [{"role": "user", "content": "Hola"}]}
+        with patch("app.main.WEB_SEARCH_ENABLED", False):
+            main._agregar_herramienta_busqueda(payload, catalogo)
+            main._inyectar_herramientas(payload, catalogo)
+        self.assertEqual([tool["function"]["name"] for tool in payload["tools"]], ["cargar_skill"])
+        self.assertIn("ejemplo", payload["messages"][0]["content"])
+        self.assertNotIn("buscar_en_web", payload["messages"][0]["content"])
+
+    async def test_timeout_sin_stream_es_error_504(self):
+        def responder(_):
+            raise httpx.ReadTimeout("tiempo agotado")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            with self.assertRaises(HTTPException) as error:
+                await main._completar_sin_stream(cliente, {"messages": []})
+        self.assertEqual(error.exception.status_code, 504)
+
+    async def test_timeout_stream_se_informa_en_sse(self):
+        class TimeoutStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"data: primer evento\n\n"
+                raise httpx.ReadTimeout("tiempo agotado")
+
+        respuesta = httpx.Response(200, stream=TimeoutStream())
+        async with httpx.AsyncClient() as cliente:
+            salida = b"".join([parte async for parte in main._completar_con_stream(
+                cliente, {"messages": []}, respuesta
+            )])
+        self.assertIn(b'"code":504', salida)
+        self.assertEqual(salida.count(b"data: [DONE]"), 1)
+
     async def test_busqueda_se_agrega_como_mensaje_tool_y_continua_inferencia(self):
         peticiones = []
 
@@ -546,6 +618,71 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
                 del main.app.state.http
             else:
                 main.app.state.http = cliente_anterior
+
+
+class CoordinadorParadaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parada_espera_a_peticiones_y_bloquea_nuevas(self):
+        motor = Mock()
+        motor.es_compatible.return_value = True
+        motor.detener.return_value = {"estado": "detenido"}
+        coordinador = Coordinador(motor)
+        agente = {}
+        await coordinador.preparar(agente, reservar=True)
+        parada = asyncio.create_task(coordinador.detener())
+        await asyncio.sleep(0)
+        nueva = asyncio.create_task(coordinador.preparar(agente, reservar=True))
+        await asyncio.sleep(0)
+        self.assertFalse(parada.done())
+        self.assertFalse(nueva.done())
+        motor.detener.assert_not_called()
+        await coordinador.liberar()
+        self.assertEqual(await asyncio.wait_for(parada, 2), {"estado": "detenido"})
+        await asyncio.wait_for(nueva, 2)
+        motor.detener.assert_called_once()
+        await coordinador.liberar()
+
+    async def test_cancelar_parada_en_espera_desbloquea_peticiones(self):
+        motor = Mock()
+        motor.es_compatible.return_value = True
+        coordinador = Coordinador(motor)
+        await coordinador.preparar({}, reservar=True)
+        parada = asyncio.create_task(coordinador.detener())
+        await asyncio.sleep(0)
+        parada.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await parada
+        await asyncio.wait_for(coordinador.preparar({}, reservar=True), 2)
+        motor.detener.assert_not_called()
+        await coordinador.liberar()
+        await coordinador.liberar()
+
+    async def test_cancelar_parada_en_curso_espera_al_hilo(self):
+        iniciado = threading.Event()
+        terminar = threading.Event()
+        motor = Mock()
+        motor.es_compatible.return_value = True
+
+        def detener():
+            iniciado.set()
+            terminar.wait(timeout=3)
+            return {"estado": "detenido"}
+
+        motor.detener.side_effect = detener
+        coordinador = Coordinador(motor)
+        parada = asyncio.create_task(coordinador.detener())
+        try:
+            self.assertTrue(await asyncio.to_thread(iniciado.wait, 2))
+            parada.cancel()
+            nueva = asyncio.create_task(coordinador.preparar({}, reservar=True))
+            await asyncio.sleep(0)
+            self.assertFalse(nueva.done())
+            terminar.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(parada, 2)
+            await asyncio.wait_for(nueva, 2)
+            await coordinador.liberar()
+        finally:
+            terminar.set()
 
 
 if __name__ == "__main__":

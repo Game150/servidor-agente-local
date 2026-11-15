@@ -42,6 +42,16 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("INFO:uvicorn.error:Skills disponibles: ejemplo", registro.output)
         self.assertNotIn("Responde usando", "\n".join(registro.output))
 
+    async def test_timeout_de_inferencia_en_minutos_o_ilimitado(self):
+        for minutos, esperado in ((0, None), (2, 120)):
+            with self.subTest(minutos=minutos):
+                with (
+                    patch.object(main, "INFERENCE_TIMEOUT_MINUTES", minutos),
+                    patch.object(main.motor, "detener"),
+                ):
+                    async with main.lifespan(main.app):
+                        self.assertEqual(main.app.state.http.timeout.read, esperado)
+
     async def test_catalogo_invalido_no_impide_arrancar(self):
         (self.raiz / "ejemplo" / "SKILL.md").write_text("invalida", encoding="utf-8")
         with patch.object(main.motor, "detener"):
@@ -78,7 +88,7 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main.logger, "info") as registro:
             catalogo = main._preparar_skills(payload)
         registro.assert_not_called()
-        self.assertIn("ejemplo: Explica ejemplos.", payload["messages"][0]["content"])
+        self.assertNotIn("ejemplo: Explica ejemplos.", payload["messages"][0]["content"])
         self.assertNotIn("Responde usando", payload["messages"][0]["content"])
         self.assertIn("ejemplo", catalogo)
 
@@ -90,6 +100,31 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertNotIn("skills", payload)
         self.assertIn("Responde usando", payload["messages"][0]["content"])
+
+    def test_inyecta_herramientas_antes_de_la_ultima_pregunta(self):
+        catalogo = skills.listar_skills()
+        payload = {"messages": [
+            {"role": "system", "content": "Sistema"},
+            {"role": "user", "content": "Primera"},
+            {"role": "assistant", "content": "Respuesta"},
+            {"role": "user", "content": "Explica"},
+        ]}
+        main._agregar_herramienta_busqueda(payload, catalogo)
+        main._inyectar_herramientas(payload, catalogo)
+        ultimo = payload["messages"][-1]["content"]
+        self.assertTrue(ultimo.startswith("Herramientas disponibles."))
+        self.assertIn("- buscar_en_web:", ultimo)
+        self.assertIn("  - ejemplo: Explica ejemplos.", ultimo)
+        self.assertTrue(ultimo.endswith("Pregunta:\nExplica"))
+        self.assertEqual(payload["messages"][1]["content"], "Primera")
+        self.assertNotIn("Herramientas disponibles", payload["messages"][0]["content"])
+
+    def test_inyeccion_sin_skills_solo_lista_busqueda_web(self):
+        payload = {"messages": [{"role": "user", "content": "Hola"}]}
+        main._inyectar_herramientas(payload, {})
+        contenido = payload["messages"][0]["content"]
+        self.assertIn("- buscar_en_web:", contenido)
+        self.assertNotIn("cargar_skill", contenido)
 
     def test_rechaza_seleccion_invalida_y_skill_inexistente(self):
         for seleccion in (["inexistente"], ["ejemplo", "ejemplo"], [123], "ejemplo"):

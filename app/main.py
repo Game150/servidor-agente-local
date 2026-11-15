@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.nucleo.config import API_KEY, LLAMA_URL
+from app.nucleo.config import API_KEY, INFERENCE_TIMEOUT_MINUTES, LLAMA_URL, WEB_SEARCH_ENABLED
 from app.servicios.busqueda import buscar_en_searxng
 from app.servicios.coordinador import Coordinador
 from app.servicios.motor_inferencia import motor
@@ -153,7 +153,11 @@ async def lifespan(app: FastAPI):
     # Un único cliente HTTP compartido. trust_env=False evita que un proxy del
     # sistema intercepte las llamadas a localhost.
     app.state.http = httpx.AsyncClient(
-        timeout=httpx.Timeout(None, connect=5.0),
+        timeout=httpx.Timeout(
+            None,
+            connect=5.0,
+            read=INFERENCE_TIMEOUT_MINUTES * 60 if INFERENCE_TIMEOUT_MINUTES else None,
+        ),
         trust_env=False,
     )
 
@@ -357,7 +361,7 @@ def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> 
         funcion = herramienta.get("function")
 
         if isinstance(funcion, dict) and (
-            funcion.get("name") == "buscar_en_web"
+            (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
             or (skills and funcion.get("name") == "cargar_skill")
         ):
             raise HTTPException(
@@ -366,7 +370,12 @@ def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> 
             )
 
     internas = [HERRAMIENTA_SKILL] if skills else []
-    payload["tools"] = [*herramientas, *internas, HERRAMIENTA_BUSQUEDA_WEB]
+    if WEB_SEARCH_ENABLED:
+        internas.append(HERRAMIENTA_BUSQUEDA_WEB)
+    if herramientas or internas:
+        payload["tools"] = [*herramientas, *internas]
+    else:
+        payload.pop("tools", None)
 
 
 def _registrar_catalogo_skills(aplicacion: FastAPI, skills: dict) -> None:
@@ -393,15 +402,6 @@ def _preparar_skills(payload: dict) -> dict:
     for nombre in seleccion:
         if nombre not in skills:
             raise HTTPException(status_code=400, detail=f"No existe la skill: {nombre}")
-    if skills:
-        catalogo = "\n".join(
-            f"- {nombre}: {skill['description']}" for nombre, skill in skills.items()
-        )
-        payload["messages"][0]["content"] += (
-            "\n\nSkills locales disponibles. Este es el catalogo completo; usa cargar_skill "
-            "solo con un nombre exacto de la lista cuando sea relevante. No inventes "
-            "skills ni busques en la web para descubrirlas:\n" + catalogo
-        )
     for nombre in seleccion:
         payload["messages"][0]["content"] += (
             f"\n\nInstrucciones de la skill {nombre}:\n{skills[nombre]['content']}"
@@ -410,10 +410,47 @@ def _preparar_skills(payload: dict) -> dict:
     return skills
 
 
+def _bloque_herramientas(skills: dict) -> str:
+    lineas = [
+        "Herramientas disponibles. Úsalas solo si la pregunta lo necesita. No cargues una skill ni busques en la web "
+        "solo porque aparezca en esta lista o porque se mencione de paso. Si puedes responder sin ellas, responde directamente.",
+    ]
+    if WEB_SEARCH_ENABLED:
+        lineas.append(f"- buscar_en_web: {HERRAMIENTA_BUSQUEDA_WEB['function']['description']}")
+    if skills:
+        lineas.append(
+            "- cargar_skill: carga las instrucciones de una skill local, solo si la tarea coincide con su "
+            "descripción y sus instrucciones son necesarias para resolverla. Usa solo un nombre exacto "
+            "de esta lista; no inventes skills ni busques en la web para descubrirlas:"
+        )
+        lineas += [f"  - {nombre}: {skill['description']}" for nombre, skill in skills.items()]
+    return "\n".join(lineas)
+
+
+def _inyectar_herramientas(payload: dict, skills: dict) -> None:
+    if not WEB_SEARCH_ENABLED and not skills:
+        return
+    indices = [
+        i for i, mensaje in enumerate(payload["messages"])
+        if isinstance(mensaje, dict) and mensaje.get("role") == "user"
+    ]
+    if not indices:
+        return
+    i = indices[-1]
+    mensaje = payload["messages"][i]
+    bloque = _bloque_herramientas(skills)
+    contenido = mensaje.get("content")
+    if isinstance(contenido, list):
+        nuevo = [{"type": "text", "text": bloque + "\n\nPregunta:"}, *contenido]
+    else:
+        nuevo = f"{bloque}\n\nPregunta:\n{contenido or ''}"
+    payload["messages"][i] = {**mensaje, "content": nuevo}
+
+
 def _es_herramienta_interna(llamada: dict, skills: dict) -> bool:
     funcion = llamada.get("function")
     return isinstance(funcion, dict) and (
-        funcion.get("name") == "buscar_en_web"
+        (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
         or (bool(skills) and funcion.get("name") == "cargar_skill")
     )
 
@@ -460,10 +497,13 @@ async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, ski
     mensajes = []
     for identificador, nombre, argumento in validadas:
         if nombre == "buscar_en_web":
+            logger.info("Busqueda web iniciada.")
             try:
                 resultado = await buscar_en_searxng(cliente, argumento)
             except (httpx.HTTPError, ValueError) as error:
+                logger.warning("Busqueda web fallida (%s).", type(error).__name__)
                 raise HTTPException(status_code=502, detail="No se pudo completar la busqueda web en SearXNG.") from error
+            logger.info("Busqueda web completada.")
         elif argumento not in skills:
             logger.warning("Skill solicitada no disponible en el catalogo local.")
             resultado = (
@@ -554,6 +594,8 @@ async def _completar_sin_stream(
             respuesta = await cliente.send(peticion, stream=True)
             cuerpo = await respuesta.aread()
             codigo = respuesta.status_code
+        except httpx.TimeoutException as error:
+            raise HTTPException(status_code=504, detail="El motor de inferencia excedio el tiempo de espera.") from error
         except httpx.RequestError as error:
             raise HTTPException(
                 status_code=503,
@@ -965,6 +1007,12 @@ async def _completar_con_stream(
         try:
             async for evento in _iterar_eventos_stream(respuesta, estado):
                 yield evento
+        except httpx.TimeoutException:
+            yield _error_sse(504, "El motor de inferencia excedio el tiempo de espera.")
+            return
+        except httpx.RequestError:
+            yield _error_sse(503, "Se interrumpio la conexion con el motor de inferencia.")
+            return
         finally:
             await respuesta.aclose()
 
@@ -1010,6 +1058,9 @@ async def _completar_con_stream(
                 json=payload,
             )
             respuesta = await cliente.send(peticion, stream=True)
+        except httpx.TimeoutException:
+            yield _error_sse(504, "El motor de inferencia excedio el tiempo de espera.")
+            return
         except httpx.RequestError as error:
             yield _error_sse(
                 503,
@@ -1020,6 +1071,12 @@ async def _completar_con_stream(
         if respuesta.status_code >= 400:
             try:
                 cuerpo = await respuesta.aread()
+            except httpx.TimeoutException:
+                yield _error_sse(504, "El motor de inferencia excedio el tiempo de espera.")
+                return
+            except httpx.RequestError:
+                yield _error_sse(503, "Se interrumpio la conexion con el motor de inferencia.")
+                return
             finally:
                 await respuesta.aclose()
 
@@ -1059,6 +1116,7 @@ async def completar_chat(request: Request, solicitud: dict):
     payload = construir_payload(agente, solicitud)
     skills = _preparar_skills(payload)
     _agregar_herramienta_busqueda(payload, skills)
+    _inyectar_herramientas(payload, skills)
     contexto = _contexto_por_slot(agente)
 
     # Arranca o cambia de modelo si hace falta y reserva un lugar. Desde acá
@@ -1080,6 +1138,9 @@ async def completar_chat(request: Request, solicitud: dict):
             json=payload,
         )
         respuesta = await cliente.send(peticion, stream=True)
+    except httpx.TimeoutException as error:
+        await coordinador.liberar()
+        raise HTTPException(status_code=504, detail="El motor de inferencia excedio el tiempo de espera.") from error
     except httpx.RequestError as error:
         await coordinador.liberar()
         raise HTTPException(
@@ -1093,6 +1154,10 @@ async def completar_chat(request: Request, solicitud: dict):
     if respuesta.status_code >= 400:
         try:
             cuerpo = await respuesta.aread()
+        except httpx.TimeoutException as error:
+            raise HTTPException(status_code=504, detail="El motor de inferencia excedio el tiempo de espera.") from error
+        except httpx.RequestError as error:
+            raise HTTPException(status_code=503, detail="Se interrumpio la conexion con el motor de inferencia.") from error
         finally:
             await respuesta.aclose()
             await coordinador.liberar()
@@ -1152,8 +1217,8 @@ async def iniciar_agente(agent_id: str):
 
 
 @protegido.post("/engine/stop")
-def detener_agente():
-    return motor.detener()
+async def detener_agente():
+    return await coordinador.detener()
 
 
 app.include_router(protegido)

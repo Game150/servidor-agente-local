@@ -220,6 +220,10 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8888/search?q=python&format=json"
 
 La API no instala ni inicia SearXNG. Sin una instancia accesible, el chat normal puede funcionar, pero las búsquedas que el modelo solicite fallarán.
 
+La búsqueda está activada por defecto. Para desactivarla, configura `WEB_SEARCH_ENABLED=false` en `.env` y reinicia la API: el servidor deja de ofrecer su herramienta `buscar_en_web`. Esto no desactiva herramientas de búsqueda propias del cliente.
+
+La consola registra el inicio, la finalización o el fallo de cada búsqueda, sin registrar la consulta ni los resultados.
+
 El servidor incorpora como máximo tres resultados y limita su tamaño. Los trata como información externa no confiable, no como instrucciones. Las búsquedas y cargas de skills comparten un máximo de tres llamadas y tres iteraciones de herramientas por solicitud.
 
 En streaming, si ocurre un error después de iniciar la respuesta, el estado HTTP ya puede ser `200`; el error se envía dentro del flujo SSE antes de `[DONE]`. Por eso, un `200 OK` en la consola no demuestra por sí solo que la búsqueda haya tenido éxito.
@@ -247,7 +251,7 @@ description: Revisa código y busca errores cuando el usuario pide una revisión
 Comprueba el comportamiento y explica los problemas encontrados con evidencia.
 ```
 
-El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo el nombre y la descripción; puede decidir cargar las instrucciones con `cargar_skill`, tanto en streaming como sin streaming. Puedes pedirle en el chat «usa la skill revisar-codigo», aunque la decisión sigue dependiendo del modelo y su soporte para tool calling.
+El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo, justo antes de la última pregunta del usuario, la lista de herramientas disponibles: `buscar_en_web` si está habilitada y el nombre con la descripción de cada skill. El modelo puede decidir cargar las instrucciones con `cargar_skill`, tanto en streaming como sin streaming. Puedes pedirle en el chat «usa la skill revisar-codigo», aunque la decisión sigue dependiendo del modelo y su soporte para tool calling.
 
 Para seleccionar una skill de forma explícita desde una integración propia, agrega el campo opcional `skills` al JSON de `POST /v1/chat/completions`:
 
@@ -362,6 +366,10 @@ Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF 
 | POST | `/v1/chat/completions` | Generar una respuesta; admite streaming |
 
 Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicitudes, excepto a `GET /`.
+
+`POST /engine/stop` espera a que terminen las respuestas activas antes de detener el motor. Mientras espera, las nuevas solicitudes de chat esperan a su vez; después pueden volver a iniciar el motor.
+
+`INFERENCE_TIMEOUT_MINUTES` en `.env` limita los minutos de inactividad al leer respuestas del motor: `0` (valor predeterminado) significa sin límite y un entero positivo configura el límite. No limita la duración total de una respuesta que sigue recibiendo datos. Al vencer se informa un error 504; en streaming, el error se envía en el flujo SSE si la respuesta ya comenzó. Reinicia la API para aplicar cambios.
 
 ## Solución de problemas
 

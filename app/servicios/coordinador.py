@@ -49,3 +49,19 @@ class Coordinador:
         async with self._cond:
             self._activas = max(0, self._activas - 1)
             self._cond.notify_all()
+
+    async def detener(self) -> dict:
+        async with self._cond:
+            await self._cond.wait_for(lambda: not self._cambiando)
+            self._cambiando = True
+            try:
+                await self._cond.wait_for(lambda: self._activas == 0)
+                tarea = asyncio.create_task(asyncio.to_thread(self._motor.detener))
+                try:
+                    return await asyncio.shield(tarea)
+                except asyncio.CancelledError:
+                    await tarea
+                    raise
+            finally:
+                self._cambiando = False
+                self._cond.notify_all()

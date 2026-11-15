@@ -45,6 +45,17 @@ def _entero(nombre: str, defecto: int) -> int:
         ) from None
 
 
+def _booleano(nombre: str, defecto: bool) -> bool:
+    valor = os.getenv(nombre, "").strip().lower()
+    if not valor:
+        return defecto
+    if valor in ("true", "1"):
+        return True
+    if valor in ("false", "0"):
+        return False
+    raise ValueError(f"La variable {nombre} debe ser true, false, 1 o 0.")
+
+
 def _ruta(nombre: str, defecto: Path) -> Path:
     valor = os.getenv(nombre, "").strip()
     ruta = Path(valor).expanduser() if valor else defecto
@@ -68,9 +79,13 @@ LOG_MAX_BYTES = _entero("LOG_MAX_BYTES", 5 * 1024 * 1024)
 LLAMA_HOST = os.getenv("LLAMA_HOST", "127.0.0.1").strip() or "127.0.0.1"
 LLAMA_PORT = _entero("LLAMA_PORT", 8080)
 LLAMA_URL = f"http://{LLAMA_HOST}:{LLAMA_PORT}"
+INFERENCE_TIMEOUT_MINUTES = _entero("INFERENCE_TIMEOUT_MINUTES", 0)
+if INFERENCE_TIMEOUT_MINUTES < 0:
+    raise ValueError("INFERENCE_TIMEOUT_MINUTES debe ser un entero mayor o igual a 0.")
 
 # --- Busqueda web ---------------------------------------------------------
 
+WEB_SEARCH_ENABLED = _booleano("WEB_SEARCH_ENABLED", True)
 SEARXNG_URL = (
     os.getenv("SEARXNG_URL", "http://192.168.10.254:8888").strip().rstrip("/")
     or "http://192.168.10.254:8888"
