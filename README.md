@@ -310,12 +310,13 @@ El cálculo usa `ctx_size / parallel` como referencia y suma entrada y generaci�
 Al terminar la respuesta, la consola puede mostrar una línea como esta, sin incluir la conversación:
 
 ```text
-INFO:     Consumo de inferencia final: entrada=700 salida=100 total=800 contexto_por_slot=16384 ocupacion=4.9% motivo=stop
+INFO:     Consumo de inferencia final: entrada=700 salida=100 total=800 contexto_por_slot=16384 ocupacion=4.9% motivo=stop prompt_tokens_s=543.66 generacion_tokens_s=61.78
 ```
 
 - `entrada` incluye los tokens del prompt; `salida`, los generados por el motor.
 - `total` es el consumo informado para la última inferencia. Si hubo llamadas a herramientas, no suma por separado todas las inferencias intermedias.
 - `contexto_por_slot` y `ocupacion` sirven como referencia aproximada.
+- `prompt_tokens_s` y `generacion_tokens_s` son las velocidades informadas por llama.cpp para procesar la entrada y generar la salida, respectivamente. Son de la última inferencia, no un promedio de toda la solicitud; la caché y el tamaño del contexto pueden afectar las comparaciones.
 - `motivo=stop` indica una finalización normal; `motivo=length` señala que la generación terminó por un límite y puede explicar una respuesta cortada, aunque no demuestra que se haya llenado el contexto.
 - Si llama.cpp no proporciona un dato, aparece `no disponible`. Los errores o cancelaciones pueden impedir que llegue la línea final.
 

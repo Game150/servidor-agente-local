@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import secrets
 from contextlib import asynccontextmanager
 
@@ -66,6 +67,15 @@ def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> Non
     def entero(valor):
         return valor if type(valor) is int and valor >= 0 else None
 
+    def velocidad(clave):
+        valor = tiempos.get(clave) if isinstance(tiempos, dict) else None
+        if type(valor) not in (int, float) or valor < 0:
+            return "no disponible"
+        try:
+            return f"{valor:.2f}" if math.isfinite(valor) else "no disponible"
+        except OverflowError:
+            return "no disponible"
+
     entrada = salida = None
     if isinstance(uso, dict):
         entrada = entero(uso.get("prompt_tokens"))
@@ -88,8 +98,10 @@ def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> Non
         ocupacion = "no disponible"
     motivo = motivo if motivo in ("stop", "length", "tool_calls", "content_filter") else "no disponible"
     logger.info(
-        "Consumo de inferencia final: entrada=%s salida=%s total=%s contexto_por_slot=%s ocupacion=%s motivo=%s",
+        "Consumo de inferencia final: entrada=%s salida=%s total=%s contexto_por_slot=%s ocupacion=%s motivo=%s "
+        "prompt_tokens_s=%s generacion_tokens_s=%s",
         valor(entrada), valor(salida), valor(total), valor(contexto), ocupacion, motivo,
+        velocidad("prompt_per_second"), velocidad("predicted_per_second"),
     )
 
 
