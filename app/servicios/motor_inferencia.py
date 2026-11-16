@@ -51,6 +51,12 @@ def construir_argumentos(binario: Path, ruta_modelo: Path, motor: dict) -> list[
         "--port", str(LLAMA_PORT),
     ]
 
+    if motor.get("batch_size") is not None:
+        argumentos += ["--batch-size", str(motor["batch_size"])]
+
+    if motor.get("ubatch_size") is not None:
+        argumentos += ["--ubatch-size", str(motor["ubatch_size"])]
+
     if motor.get("flash_attn"):
         argumentos += ["-fa", motor["flash_attn"]]
 

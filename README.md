@@ -388,10 +388,55 @@ Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicit
 Los parámetros del bloque `motor` permiten ajustar el uso de recursos:
 
 - `ctx_size`: tamaño del contexto. Aumentarlo consume más memoria.
+- `batch_size`: tamaño máximo lógico del lote de procesamiento del prompt, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, añade `batch_size: 2048` bajo `motor`. Si se omite, se usa el valor predeterminado de llama.cpp. No es el tamaño de microbatch físico (`--ubatch-size`); aumentar el lote no garantiza mayor velocidad y puede requerir más memoria. Al cambiarlo se reinicia el motor en la siguiente solicitud.
+- `ubatch_size`: tamaño máximo del microbatch físico, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, `ubatch_size: 512`. Si se omite, se usa el valor predeterminado de llama.cpp. Conviene mantenerlo igual o menor que `batch_size`; un valor mayor puede consumir más memoria y no garantiza mayor velocidad. Al cambiarlo se reinicia el motor en la siguiente solicitud. No lo declares también mediante `extra_args`, para evitar argumentos duplicados.
 - `gpu_layers`: cantidad de capas que llama.cpp intenta ejecutar en la GPU. `99` intenta descargar tantas como sea posible.
 - `parallel`: cantidad de solicitudes que el motor puede atender en paralelo; más paralelismo puede consumir más memoria y reducir el contexto disponible por solicitud.
 
 Cambia un valor por vez y compara el resultado. No hay una configuración óptima universal: depende del modelo, su cuantización y el hardware.
+
+### Ejemplo medido: RX 6600 XT
+
+Estas pruebas se ejecutaron el 16 de noviembre de 2026 con una RX 6600 XT de 8 GiB, CPU i5-10500T, Vulkan y `llama-bench` b12292 (`af6b5243d`), usando `qwen3.5-4b-Q4_K_M`. Se probaron tres veces por combinación: procesamiento de 4096 tokens de entrada y, por separado, generación de 128 tokens. Se configuraron 99 capas en GPU, caché K/V `q8_0`, seis hilos y flash attention en `auto`. Las velocidades son promedios; **procesamiento y generación son pruebas separadas**, no la velocidad de una misma conversación.
+
+Cada gráfico usa el batch en el eje horizontal. Las **barras** representan `ubatch_size: 256` y la **línea** representa `ubatch_size: 512`.
+
+```mermaid
+xychart-beta
+    title "Procesamiento del prompt (tokens/s)"
+    x-axis "Batch" [512, 1024, 2048]
+    y-axis "Tokens/s" 0 --> 650
+    bar [558.7, 560.8, 561.1]
+    line [570.7, 571.4, 571.6]
+```
+
+```mermaid
+xychart-beta
+    title "Pico observado de VRAM dedicada (GiB)"
+    x-axis "Batch" [512, 1024, 2048]
+    y-axis "GiB" 0 --> 8
+    bar [3.91, 4.25, 4.25]
+    line [4.54, 4.52, 4.52]
+```
+
+| Batch | Microbatch | Prompt (tokens/s) | Generación (tokens/s) | Pico VRAM (GiB) |
+|---:|---:|---:|---:|---:|
+| 512 | 256 | 558,7 | 67,5 | 3,91 |
+| 512 | 512 | 570,7 | 68,6 | 4,54 |
+| 1024 | 256 | 560,8 | 68,7 | 4,25 |
+| 1024 | 512 | 571,4 | 68,6 | 4,52 |
+| 2048 | 256 | 561,1 | 68,6 | 4,25 |
+| 2048 | 512 | 571,6 | 68,6 | 4,52 |
+
+El pico de VRAM se muestreó con el contador `GPU Adapter Memory / Dedicated Usage` de Windows durante cada ejecución; incluye el escritorio y otros procesos, no solo el modelo, y puede no captar picos breves. En esta muestra, aumentar el microbatch de 256 a 512 mejoró ligeramente el procesamiento del prompt; cambiar el batch tuvo poco efecto. La generación fue similar en todas las combinaciones. **Los datos no muestran una relación exponencial** ni permiten atribuir cada diferencia de VRAM exclusivamente a estos ajustes.
+
+La prueba usa el contexto que asigna `llama-bench` para cada prueba, no el `ctx_size` de 65536 del agente: no predice su consumo real con ese contexto ni el rendimiento de Cline. Para repetir una combinación desde la raíz del proyecto, sustituye la ruta al GGUF:
+
+```powershell
+.\llama-b12292-bin-win-vulkan-x64\llama-bench.exe -m "C:\ruta\al\modelo.gguf" -p 4096 -n 128 -r 3 -b 2048 -ub 512 -ngl 99 -ctk q8_0 -ctv q8_0
+```
+
+Para medir VRAM, observa la memoria dedicada de la GPU por separado, por ejemplo con el Administrador de tareas de Windows. Otros modelos, contextos, versiones y cargas del equipo pueden dar resultados distintos.
 
 ## Seguridad y alcance
 

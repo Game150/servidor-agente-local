@@ -20,6 +20,8 @@ PARAMETROS_DEFECTO = {
 # Configuración de llama-server para cada agente.
 MOTOR_DEFECTO = {
     "ctx_size": 8192,
+    "batch_size": None,
+    "ubatch_size": None,
     "gpu_layers": 99,
     "parallel": 1,
     "cache_type_k": "q8_0",
@@ -90,6 +92,16 @@ def _validar_motor(bruto, archivo: str) -> dict:
 
     if not _es_entero(motor["ctx_size"]) or motor["ctx_size"] < 256:
         raise _fallo(archivo, "motor.ctx_size debe ser un entero >= 256")
+
+    if motor["batch_size"] is not None and (
+        not _es_entero(motor["batch_size"]) or motor["batch_size"] < 1
+    ):
+        raise _fallo(archivo, "motor.batch_size debe ser un entero >= 1")
+
+    if motor["ubatch_size"] is not None and (
+        not _es_entero(motor["ubatch_size"]) or motor["ubatch_size"] < 1
+    ):
+        raise _fallo(archivo, "motor.ubatch_size debe ser un entero >= 1")
 
     if not _es_entero(motor["gpu_layers"]) or motor["gpu_layers"] < -1:
         raise _fallo(archivo, "motor.gpu_layers debe ser un entero >= -1")
