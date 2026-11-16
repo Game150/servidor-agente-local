@@ -1,9 +1,14 @@
+# Identificador usado en el campo model de las solicitudes a la API.
 id: desarrollador
+# Nombre descriptivo del agente.
 nombre: Agente Desarrollador Qwen 3.5
+# Descripción que aparece al consultar los agentes.
 descripcion: Asistente de desarrollo con búsqueda web para información actualizada.
 
+# Nombre del archivo GGUF sin la extensión .gguf.
 modelo: qwen3.5-4b-Q4_K_M
 
+# Instrucciones de sistema que recibe el modelo.
 system_prompt: |
   Eres un asistente especializado en desarrollo de software.
   Responde en español, de forma clara y directa.
@@ -18,16 +23,38 @@ system_prompt: |
   Si la búsqueda falla o no tienes información suficiente, indícalo claramente.
 
 parametros:
+  # Controla la aleatoriedad: valores menores suelen dar respuestas más predecibles.
   temperature: 0.3
+  # Limita la selección a los tokens que acumulan esta probabilidad.
   top_p: 0.9
+  # Máximo de tokens que puede generar la respuesta, incluido el razonamiento.
   max_tokens: 8192
+  # Si es true, los parámetros del agente prevalecen sobre los del cliente.
   forzar: false
 
+  # Opcionales: descomenta para enviarlos a llama.cpp.
+  # top_k: 40           # Limita la selección a los K tokens más probables; 0 desactiva el filtro.
+  # min_p: 0.05         # Descarta tokens con probabilidad baja respecto al más probable; 0 lo desactiva.
+  # repeat_penalty: 1.0 # Penaliza repeticiones; 1.0 no aplica penalización.
+
 motor:
+  # Contexto total en tokens, compartido entre los slots definidos en parallel.
   ctx_size: 65536
-  # batch_size: 2048
-  # ubatch_size: 512
+  # Máximo lógico de tokens por lote durante el procesamiento del prompt.
+  batch_size: 2048
+  # Máximo físico de tokens procesados a la vez; afecta velocidad y memoria.
+  ubatch_size: 256
+  # Máximo de capas que llama.cpp intenta descargar a la GPU; 99 intenta todas.
   gpu_layers: 99
+  # Hilos de CPU para generación; también se usan para el prompt si no se indica otro valor.
+  threads: 4
+  # Argumentos adicionales de llama-server; aquí se usan 6 hilos para procesar el prompt.
+  extra_args: ["--threads-batch", "6"]
+  # Cantidad de slots simultáneos; el contexto total se reparte entre ellos.
   parallel: 1
+  # Formato de la caché de claves; q8_0 reduce memoria frente a formatos de mayor precisión.
   cache_type_k: q8_0
+  # Formato de la caché de valores; puede afectar memoria, rendimiento y precisión.
   cache_type_v: q8_0
+  # Flash Attention: "on", "off" o "auto", según compatibilidad del modelo y backend.
+  flash_attn: "on"
