@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -8,6 +9,36 @@ from app.nucleo.config import SKILLS_DIR
 MAX_SKILLS = 50
 MAX_BYTES_SKILL = 32_000
 NOMBRE_SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def _normalizar(texto: str) -> str:
+    sin_acentos = unicodedata.normalize("NFD", texto.lower())
+    return "".join(c for c in sin_acentos if unicodedata.category(c) != "Mn").strip()
+
+
+def elegir_skill(texto: str, skills: dict[str, dict]) -> str | None:
+    """Elige la skill cuyos `triggers` (prefijos de palabra) más aparecen en el texto.
+
+    Devuelve None si no hay coincidencias o si hay empate, para que decida el modelo.
+    """
+    texto = _normalizar(texto)
+    puntajes = {
+        nombre: sum(1 for t in skill.get("triggers", []) if re.search(r"\b" + re.escape(t), texto))
+        for nombre, skill in skills.items()
+    }
+    mejor = max(puntajes.values(), default=0)
+    ganadoras = [nombre for nombre, puntaje in puntajes.items() if puntaje == mejor]
+    return ganadoras[0] if mejor and len(ganadoras) == 1 else None
+
+
+def skills_del_agente(skills: dict[str, dict], agente_id: str | None) -> dict[str, dict]:
+    """Skills visibles para un agente: las sin `agentes` y las que lo listan."""
+    if agente_id is None:
+        return skills
+    return {
+        nombre: skill for nombre, skill in skills.items()
+        if not skill.get("agentes") or agente_id in skill["agentes"]
+    }
 
 
 def listar_skills() -> dict[str, dict[str, str]]:
@@ -55,7 +86,18 @@ def listar_skills() -> dict[str, dict[str, str]]:
                 raise ValueError("La descripcion debe tener entre 1 y 1024 caracteres.")
             if not instrucciones:
                 raise ValueError("La skill no contiene instrucciones.")
-            skills[nombre] = {"description": descripcion.strip(), "content": instrucciones}
+            triggers = meta.get("triggers", [])
+            if not isinstance(triggers, list) or any(not isinstance(t, str) or not t.strip() for t in triggers):
+                raise ValueError("triggers debe ser una lista de textos.")
+            agentes = meta.get("agentes", [])
+            if not isinstance(agentes, list) or any(not isinstance(a, str) or not a.strip() for a in agentes):
+                raise ValueError("agentes debe ser una lista de identificadores.")
+            skills[nombre] = {
+                "description": descripcion.strip(),
+                "content": instrucciones,
+                "triggers": [_normalizar(t) for t in triggers],
+                "agentes": [a.strip() for a in agentes],
+            }
         except (OSError, UnicodeError, yaml.YAMLError, ValueError) as error:
             raise ValueError(f"Skill invalida '{carpeta.name}': {error}") from error
     return skills

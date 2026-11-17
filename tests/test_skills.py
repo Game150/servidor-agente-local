@@ -101,6 +101,37 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("skills", payload)
         self.assertIn("Responde usando", payload["messages"][0]["content"])
 
+    def test_seleccion_automatica_por_triggers_ignorando_environment_details(self):
+        (self.raiz / "ejemplo" / "SKILL.md").write_text(
+            "---\nname: ejemplo\ndescription: Explica ejemplos.\ntriggers: [explic]\n---\n"
+            "Responde usando la instruccion de ejemplo.\n",
+            encoding="utf-8",
+        )
+        def preparar(usuario):
+            payload = {"messages": [
+                {"role": "system", "content": "Sistema"},
+                {"role": "user", "content": usuario},
+            ]}
+            main._preparar_skills(payload)
+            return payload["messages"][0]["content"]
+
+        self.assertIn("Responde usando", preparar("<task>\nExplícame el proyecto\n</task>"))
+        self.assertNotIn("Responde usando", preparar(
+            "<task>\nCorrige el bug\n</task>\n<environment_details>explica</environment_details>"
+        ))
+
+    def test_filtra_skills_por_agente(self):
+        (self.raiz / "solo-trabajo").mkdir()
+        (self.raiz / "solo-trabajo" / "SKILL.md").write_text(
+            "---\nname: solo-trabajo\ndescription: Skill restringida.\nagentes: [trabajo]\n---\nInstrucciones.\n",
+            encoding="utf-8",
+        )
+        catalogo = skills.listar_skills()
+        self.assertEqual(set(skills.skills_del_agente(catalogo, "trabajo")), {"ejemplo", "solo-trabajo"})
+        self.assertEqual(set(skills.skills_del_agente(catalogo, "desarrollador")), {"ejemplo"})
+        payload = {"messages": [{"role": "system", "content": "Sistema"}]}
+        self.assertEqual(set(main._preparar_skills(payload, "desarrollador")), {"ejemplo"})
+
     def test_inyecta_herramientas_antes_de_la_ultima_pregunta(self):
         catalogo = skills.listar_skills()
         payload = {"messages": [
@@ -113,6 +144,8 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         main._inyectar_herramientas(payload, catalogo)
         ultimo = payload["messages"][-1]["content"]
         self.assertTrue(ultimo.startswith("Herramientas disponibles."))
+        self.assertIn("coincide claramente con la descripción de una skill, llama cargar_skill antes de usar otras herramientas", ultimo)
+        self.assertNotIn("Si puedes responder sin ellas", ultimo)
         self.assertIn("- buscar_en_web:", ultimo)
         self.assertIn("  - ejemplo: Explica ejemplos.", ultimo)
         self.assertTrue(ultimo.endswith("Pregunta:\nExplica"))
@@ -179,6 +212,34 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Listo")
         self.assertIn("Responde usando", peticiones[1]["messages"][-1]["content"])
         self.assertEqual(peticiones[1]["messages"][-1]["tool_call_id"], "call-1")
+
+    async def test_mezcla_no_expone_cargar_skill_al_cliente_sin_stream(self):
+        catalogo = skills.listar_skills()
+        llamadas = [
+            {"id": "a", "type": "function", "function": {"name": "cargar_skill", "arguments": '{"name":"ejemplo"}'}},
+            {"id": "b", "type": "function", "function": {"name": "read_files", "arguments": "{}"}},
+        ]
+
+        def responder(request):
+            return httpx.Response(200, json={"choices": [{"message": {
+                "role": "assistant", "tool_calls": llamadas}, "finish_reason": "tool_calls"}]})
+
+        payload = {"messages": [{"role": "system", "content": ""}]}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            respuesta = await main._completar_sin_stream(cliente, payload, catalogo)
+        reenviadas = json.loads(respuesta.body)["choices"][0]["message"]["tool_calls"]
+        self.assertEqual([l["function"]["name"] for l in reenviadas], ["read_files"])
+
+    def test_quita_llamadas_internas_de_eventos_stream(self):
+        evento = main._codificar_evento_sse({"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "a", "function": {"name": "cargar_skill"}},
+            {"index": 1, "id": "b", "function": {"name": "read_files"}},
+        ]}}]})
+        limpio = json.loads(main._quitar_llamadas_stream(evento, {0})[5:])
+        self.assertEqual([l["index"] for l in limpio["choices"][0]["delta"]["tool_calls"]], [1])
+        solo_interna = main._codificar_evento_sse({"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"name": "cargar_skill"}}]}}]})
+        self.assertEqual(main._quitar_llamadas_stream(solo_interna, {0}), b"")
 
     async def test_skill_inexistente_permite_recuperarse_sin_stream(self):
         catalogo = skills.listar_skills()

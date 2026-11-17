@@ -251,7 +251,11 @@ description: Revisa código y busca errores cuando el usuario pide una revisión
 Comprueba el comportamiento y explica los problemas encontrados con evidencia.
 ```
 
-El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo, justo antes de la última pregunta del usuario, la lista de herramientas disponibles: `buscar_en_web` si está habilitada y el nombre con la descripción de cada skill. El modelo puede decidir cargar las instrucciones con `cargar_skill`, tanto en streaming como sin streaming. Puedes pedirle en el chat «usa la skill revisar-codigo», aunque la decisión sigue dependiendo del modelo y su soporte para tool calling.
+El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo, justo antes de la última pregunta del usuario, la lista de herramientas disponibles: `buscar_en_web` si está habilitada y el nombre con la descripción de cada skill. El modelo analiza la petición y, si una skill coincide claramente con la tarea principal, debe cargarla con `cargar_skill` antes de usar otras herramientas. Si ninguna coincide, puede continuar sin cargar una. También puedes pedir una skill por nombre, aunque la selección automática depende del modelo y de su soporte para tool calling.
+
+Para no depender del modelo, el frontmatter acepta `triggers`, una lista opcional de prefijos de palabra (sin importar mayúsculas ni acentos), por ejemplo `triggers: [revis, "code review"]`. Si la petición del usuario (en Cline, el contenido de `<task>`) coincide con los triggers de una única skill, el servidor carga sus instrucciones directamente y lo registra como «seleccion automatica». Con empate o sin coincidencias, decide el modelo.
+
+El frontmatter también acepta `agentes`, una lista opcional de identificadores de agente (el `id` del YAML), por ejemplo `agentes: [desarrollador]`. Si se define, solo esos agentes ven y cargan la skill; sin el campo, la ven todos.
 
 Para seleccionar una skill de forma explícita desde una integración propia, agrega el campo opcional `skills` al JSON de `POST /v1/chat/completions`:
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import secrets
 from contextlib import asynccontextmanager
 
@@ -19,10 +20,10 @@ from app.nucleo.config import API_KEY, INFERENCE_TIMEOUT_MINUTES, LLAMA_URL, WEB
 from app.servicios.busqueda import buscar_en_searxng
 from app.servicios.coordinador import Coordinador
 from app.servicios.motor_inferencia import motor
-from app.servicios.payload import construir_payload
+from app.servicios.payload import _texto, construir_payload
 from app.servicios.registro_agentes import listar_agentes, obtener_agente
 from app.servicios.registro_modelos import listar_modelos
-from app.servicios.skills import NOMBRE_SKILL, listar_skills
+from app.servicios.skills import NOMBRE_SKILL, elegir_skill, listar_skills, skills_del_agente
 
 coordinador = Coordinador(motor)
 logger = logging.getLogger("uvicorn.error")
@@ -397,7 +398,7 @@ def _registrar_catalogo_skills(aplicacion: FastAPI, skills: dict) -> None:
         aplicacion.state.catalogo_skills = nombres
 
 
-def _preparar_skills(payload: dict) -> dict:
+def _preparar_skills(payload: dict, agente_id: str | None = None) -> dict:
     seleccion = payload.pop("skills", [])
     if (
         not isinstance(seleccion, list)
@@ -419,23 +420,50 @@ def _preparar_skills(payload: dict) -> dict:
             f"\n\nInstrucciones de la skill {nombre}:\n{skills[nombre]['content']}"
         )
         logger.info("Skill cargada: %s (seleccion explicita)", nombre)
+    skills = skills_del_agente(skills, agente_id)
+    if not seleccion:
+        nombre = elegir_skill(_texto_ultima_peticion(payload["messages"]), skills)
+        if nombre:
+            payload["messages"][0]["content"] += (
+                f"\n\nInstrucciones de la skill {nombre}:\n{skills[nombre]['content']}"
+            )
+            logger.info("Skill cargada: %s (seleccion automatica)", nombre)
     return skills
 
 
-def _bloque_herramientas(skills: dict) -> str:
+def _texto_ultima_peticion(mensajes: list) -> str:
+    """Texto del último mensaje de usuario sin el ruido de clientes como Cline."""
+    for mensaje in reversed(mensajes):
+        if isinstance(mensaje, dict) and mensaje.get("role") == "user":
+            texto = _texto(mensaje.get("content"))
+            texto = re.sub(r"<environment_details>.*?</environment_details>", "", texto, flags=re.S)
+            partes = re.findall(r"<(?:task|feedback|user_message)>(.*?)</(?:task|feedback|user_message)>", texto, flags=re.S)
+            return ("\n".join(partes) if partes else texto)[:2000]
+    return ""
+
+
+def _bloque_herramientas(skills: dict, cargadas: frozenset = frozenset()) -> str:
     lineas = [
-        "Herramientas disponibles. Úsalas solo si la pregunta lo necesita. No cargues una skill ni busques en la web "
-        "solo porque aparezca en esta lista o porque se mencione de paso. Si puedes responder sin ellas, responde directamente.",
+        "Herramientas disponibles. Analiza primero la petición completa y usa solo las herramientas que necesites.",
     ]
     if WEB_SEARCH_ENABLED:
         lineas.append(f"- buscar_en_web: {HERRAMIENTA_BUSQUEDA_WEB['function']['description']}")
     if skills:
         lineas.append(
-            "- cargar_skill: carga las instrucciones de una skill local, solo si la tarea coincide con su "
-            "descripción y sus instrucciones son necesarias para resolverla. Usa solo un nombre exacto "
+            "Si la tarea principal coincide claramente con la descripción de una skill, llama cargar_skill antes de "
+            "usar otras herramientas y sigue sus instrucciones. Carga solo la skill más pertinente; usa más de una "
+            "únicamente si son complementarias. Si ninguna coincide claramente, no cargues una. No cargues skills "
+            "por menciones de paso."
+        )
+        lineas.append(
+            "- cargar_skill: carga las instrucciones de una skill local pertinente. Usa solo un nombre exacto "
             "de esta lista; no inventes skills ni busques en la web para descubrirlas:"
         )
-        lineas += [f"  - {nombre}: {skill['description']}" for nombre, skill in skills.items()]
+        lineas += [
+            f"  - {nombre}: {skill['description']}"
+            + (" [YA CARGADA en las instrucciones del sistema; no la pidas]" if nombre in cargadas else "")
+            for nombre, skill in skills.items()
+        ]
     return "\n".join(lineas)
 
 
@@ -450,7 +478,12 @@ def _inyectar_herramientas(payload: dict, skills: dict) -> None:
         return
     i = indices[-1]
     mensaje = payload["messages"][i]
-    bloque = _bloque_herramientas(skills)
+    sistema = payload["messages"][0].get("content") if isinstance(payload["messages"][0], dict) else None
+    cargadas = frozenset(
+        nombre for nombre in skills
+        if isinstance(sistema, str) and f"Instrucciones de la skill {nombre}:" in sistema
+    )
+    bloque = _bloque_herramientas(skills, cargadas)
     contenido = mensaje.get("content")
     if isinstance(contenido, list):
         nuevo = [{"type": "text", "text": bloque + "\n\nPregunta:"}, *contenido]
@@ -677,6 +710,14 @@ async def _completar_sin_stream(
             for llamada in tool_calls
         ):
             _registrar_consumo(datos, contexto, elecciones[0].get("finish_reason"))
+            # Mezcla de herramientas del cliente e internas: el cliente solo recibe las suyas.
+            propias = [
+                llamada for llamada in tool_calls
+                if not (isinstance(llamada, dict) and _es_herramienta_interna(llamada, skills))
+            ]
+            if propias and len(propias) != len(tool_calls):
+                mensaje["tool_calls"] = propias
+                cuerpo = json.dumps(datos, ensure_ascii=False).encode("utf-8")
             return Response(
                 content=cuerpo,
                 status_code=codigo,
@@ -888,8 +929,40 @@ async def _iterar_eventos_stream(respuesta: httpx.Response, estado: dict):
         estado["llamadas_internas"] = llamadas
         return
 
+    skills_activas = estado.get("skills", {})
+    internas = {
+        indice for indice in estado["llamadas"]
+        if _es_herramienta_interna(estado["llamadas"][indice], skills_activas)
+    }
     for evento in estado["eventos_retenidos"]:
-        yield evento
+        if internas:
+            evento = _quitar_llamadas_stream(evento, internas)
+        if evento:
+            yield evento
+
+
+def _quitar_llamadas_stream(evento: bytes, indices: set[int]) -> bytes:
+    """Quita de un evento SSE los deltas de tool calls internas (el cliente no las conoce)."""
+    if not evento.startswith(b"data:") or evento.startswith(b"data: [DONE]"):
+        return evento
+    try:
+        datos = json.loads(evento[5:].decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return evento
+    cambiado = False
+    for eleccion in datos.get("choices", []) if isinstance(datos, dict) else []:
+        delta = eleccion.get("delta") if isinstance(eleccion, dict) else None
+        llamadas = delta.get("tool_calls") if isinstance(delta, dict) else None
+        if isinstance(llamadas, list):
+            delta["tool_calls"] = [
+                l for l in llamadas if not (isinstance(l, dict) and l.get("index") in indices)
+            ]
+            cambiado = True
+            if not delta["tool_calls"]:
+                del delta["tool_calls"]
+                if not delta and not eleccion.get("finish_reason"):
+                    return b""
+    return _codificar_evento_sse(datos) if cambiado else evento
 
 
 async def _procesar_evento_stream(lineas: list[str], estado: dict):
@@ -1126,7 +1199,7 @@ async def completar_chat(request: Request, solicitud: dict):
             detail="Debes proporcionar una lista de mensajes.",
         )
     payload = construir_payload(agente, solicitud)
-    skills = _preparar_skills(payload)
+    skills = _preparar_skills(payload, agente.get("id"))
     _agregar_herramienta_busqueda(payload, skills)
     _inyectar_herramientas(payload, skills)
     contexto = _contexto_por_slot(agente)
