@@ -42,6 +42,26 @@ class LogDeCargaTests(unittest.TestCase):
             with self.subTest(valor=valor), self.assertRaisesRegex(ValueError, "motor.batch_size"):
                 _validar_motor({"batch_size": valor}, "agente.yaml")
 
+    def test_embeddings_usa_puerto_y_modo_independientes(self):
+        argumentos = construir_argumentos(
+            Path("llama-server"),
+            Path("embeddings.gguf"),
+            {
+                "gpu_layers": 0,
+                "ctx_size": 2048,
+                "parallel": 1,
+                "cache_type_k": "q8_0",
+                "cache_type_v": "f16",
+            },
+            host="127.0.0.1",
+            port=8081,
+            embedding=True,
+        )
+
+        self.assertIn("--embedding", argumentos)
+        self.assertEqual(argumentos[argumentos.index("--port") + 1], "8081")
+        self.assertEqual(argumentos[argumentos.index("-m") + 1], "embeddings.gguf")
+
     def test_ubatch_size_se_envia_y_cambia_huella(self):
         anterior = _validar_motor({"batch_size": 1024}, "agente.yaml")
         configurado = _validar_motor({"batch_size": 1024, "ubatch_size": 256}, "agente.yaml")

@@ -8,10 +8,11 @@ Esta guía está pensada para empezar en Windows. Los nombres de las rutas y alg
 
 - Agentes configurados mediante YAML y ejecución local de modelos GGUF, sin Ollama.
 - Chat compatible con OpenAI, con respuestas normales o streaming.
+- Modelo de embeddings independiente y búsqueda semántica opcional mediante MCP.
 - Búsqueda opcional mediante SearXNG y skills locales que el modelo puede solicitar.
 - Avisos al acercarse al límite de contexto y registro del consumo de la última inferencia.
 
-Empieza por [Inicio rápido](#inicio-rápido); después puedes consultar [Búsqueda web](#búsqueda-web), [Skills locales](#skills-locales) y [Contexto y consumo](#contexto-y-consumo).
+Empieza por [Inicio rápido](#inicio-rápido); después puedes consultar [Embeddings](#embeddings-con-un-modelo-separado), [Búsqueda web](#búsqueda-web), [Skills locales](#skills-locales) y [Contexto y consumo](#contexto-y-consumo).
 
 ## Qué necesitas
 
@@ -139,7 +140,120 @@ La primera respuesta puede tardar mientras se carga el modelo. Las siguientes re
 
 ## Conecta una aplicación cliente
 
-La API ofrece los endpoints `GET /v1/models` y `POST /v1/chat/completions`. No implementa todas las rutas ni todas las funciones de cada proveedor compatible con OpenAI.
+La API ofrece los endpoints `GET /v1/models`, `POST /v1/chat/completions` y, si configuras un modelo dedicado, `POST /v1/embeddings`. No implementa todas las rutas ni todas las funciones de cada proveedor compatible con OpenAI.
+
+### Embeddings con un modelo separado
+
+Un modelo de embeddings convierte texto en vectores numéricos. Estos permiten comparar la similitud entre textos; por ejemplo, una herramienta puede buscar fragmentos de código relacionados con una consulta. **No generan respuestas de chat ni añaden contexto automáticamente**: un cliente debe solicitar los vectores y decidir cómo utilizarlos.
+
+#### Configuración
+
+Descarga por separado un modelo GGUF compatible con embeddings y colócalo en `MODELS_DIR`. Configura su nombre de archivo **sin `.gguf`** en el `.env` del servidor. Este es un ejemplo: cambia el nombre para que coincida exactamente con tu archivo.
+
+```dotenv
+EMBEDDINGS_MODEL=nomic-embed-text-v1.5
+EMBEDDINGS_HOST=127.0.0.1
+EMBEDDINGS_PORT=8081
+EMBEDDINGS_CTX_SIZE=2048
+EMBEDDINGS_GPU_LAYERS=0
+```
+
+| Variable | Valor predeterminado | Función |
+|---|---|---|
+| `EMBEDDINGS_MODEL` | Vacío | Nombre del GGUF sin extensión. Vacío deja el endpoint sin modelo disponible. |
+| `EMBEDDINGS_HOST` | El valor de `LLAMA_HOST` | Dirección interna del proceso de embeddings. Normalmente `127.0.0.1`. |
+| `EMBEDDINGS_PORT` | `8081` | Puerto interno del proceso de embeddings; debe estar libre y ser distinto del puerto del motor de chat. |
+| `EMBEDDINGS_CTX_SIZE` | `2048` | Tamaño de contexto del motor de embeddings, en tokens. Debe ser mayor que cero. También se usa como tamaño de batch y microbatch. |
+| `EMBEDDINGS_GPU_LAYERS` | `0` | Capas que se intentan cargar en GPU. `0` usa CPU; un valor mayor puede usar VRAM y acelerar el procesamiento. |
+
+Esta configuración es independiente de los YAML de agentes. Por ahora no hay ajustes propios de hilos, paralelismo o argumentos adicionales para embeddings; el motor usa un slot. Un contexto mayor puede requerir más memoria, y el límite efectivo también depende del modelo y de llama.cpp. Los resultados dependen del GGUF, su configuración de pooling y la versión de llama.cpp.
+
+Reinicia la API después de cambiar `.env`. Si también usas el MCP, reinicia su proceso en el cliente para que vuelva a leer la configuración. Las variables de entorno ya definidas tienen prioridad sobre `.env`.
+
+#### Carga y uso de memoria
+
+La API no carga el modelo de embeddings al arrancar. La primera petición válida a `POST /v1/embeddings` inicia otro proceso `llama-server` y espera a que cargue el GGUF. Las siguientes peticiones reutilizan ese proceso; **no se descarga tras cada búsqueda**. El modelo de chat puede seguir cargado y atendiendo solicitudes en su propio proceso.
+
+Ambos modelos pueden consumir memoria al mismo tiempo. Por defecto, embeddings usa CPU para no competir por la VRAM del chat. Al detener la API se detienen ambos procesos; `POST /engine/stop` solo detiene el motor de chat, no el de embeddings. El estado de `/engine/status` también corresponde al motor de chat. El log de embeddings está en `logs/llama-server-embeddings.log`, o en `LOG_DIR` si cambiaste esa carpeta.
+
+#### Probar el endpoint
+
+Mantén la API iniciada y ejecuta en PowerShell, sustituyendo el nombre por el de `EMBEDDINGS_MODEL`:
+
+```powershell
+$headers = @{}
+# Si configuraste API_KEY, descomenta y reemplaza el valor:
+# $headers.Authorization = "Bearer TU_CLAVE"
+
+$body = @{
+  model = "nomic-embed-text-v1.5"
+  input = "Texto de ejemplo"
+} | ConvertTo-Json
+
+$resultado = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/v1/embeddings `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
+
+$resultado.data[0].embedding
+```
+
+La respuesta contiene el vector en `data[0].embedding`; su dimensión depende del modelo. La primera petición puede tardar mientras se carga. También puedes enviar varios textos en `input`:
+
+```json
+{
+  "model": "nomic-embed-text-v1.5",
+  "input": ["primer texto", "segundo texto"]
+}
+```
+
+El campo `model` debe coincidir con `EMBEDDINGS_MODEL`. La API reenvía `input` y los demás campos al llama-server de embeddings, sustituyendo `model` por `local` internamente; las opciones admitidas y el formato de respuesta dependen de esa versión de llama.cpp. El identificador configurado también aparece en `GET /v1/models`. La ruta usa la misma autenticación `API_KEY` que el chat.
+
+Si falta `input`, responde `400`; si el modelo solicitado no coincide, `404`; y si no está configurado o no puede arrancar, `503`. Los errores del motor también se devuelven al cliente. Comprueba el log de embeddings si el GGUF no carga o no admite embeddings.
+
+### Búsqueda semántica local para Cline
+
+El MCP opcional permite que Cline busque código por significado sin enviarle todo el proyecto. Es un servidor MCP local por **stdio**: también puede configurarse en otras extensiones o IDEs que admitan ese transporte y permitan al agente llamar herramientas MCP. La configuración concreta depende del cliente.
+
+La indexación se inicia **solo cuando se solicita** y el índice SQLite queda en `logs/indices/`, o en `LOG_DIR/indices/` si cambiaste la carpeta; no requiere Qdrant. Necesitas Git, un proyecto Git, el modelo de embeddings configurado y la API de este proyecto en ejecución. La primera indexación puede tardar: genera embeddings para cada fragmento.
+
+Instala el SDK MCP en el entorno virtual del servidor:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt
+```
+
+En Cline abre **MCP Servers > Configure > Configure MCP Servers** y añade una entrada a `mcpServers`. Sustituye ambas rutas por rutas absolutas de tu equipo; en JSON las barras invertidas se escriben dobles:
+
+```json
+{
+  "mcpServers": {
+    "busqueda-codigo-local": {
+      "command": "C:\\ruta\\servidor-agente-local\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\ruta\\servidor-agente-local\\mcp_busqueda.py"],
+      "env": {
+        "MCP_WORKSPACE": "C:\\ruta\\proyecto-a-indexar"
+      },
+      "timeout": 600,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+El MCP toma `EMBEDDINGS_MODEL` y `API_KEY` del `.env` de este servidor. Por defecto llama a `http://127.0.0.1:8000`; si la API escucha en otra dirección, añade `MCP_API_URL` a `env` y reinicia el MCP. Para modelos que requieren prefijos de tarea, como Nomic Embed, añade `"MCP_DOCUMENT_PREFIX": "search_document:"` y `"MCP_QUERY_PREFIX": "search_query:"` a `env` antes de indexar. Usa los prefijos indicados por el modelo que elegiste.
+
+Pide a Cline que ejecute `indexar_proyecto` para crear o actualizar el índice, y luego `buscar_codigo` con una consulta en lenguaje natural. Por ejemplo: «Indexa el proyecto y busca dónde se valida el inicio de sesión».
+
+Al indexar, el MCP divide el texto en fragmentos de hasta 1000 caracteres y solicita un vector para cada uno. Al buscar, convierte la consulta en otro vector y compara su similitud con los guardados. Devuelve por defecto los tres fragmentos más similares, con ruta, líneas y puntuación; el parámetro `limite` acepta de uno a cinco resultados. La consulta admite hasta 1000 caracteres. El texto y las líneas corresponden a la última indexación, no necesariamente al estado actual del archivo.
+
+La indexación posterior reutiliza los vectores de archivos sin cambios y elimina los archivos ya no presentes. No hay observador automático: vuelve a indexar cuando cambie el código. Si cambia el nombre del modelo o los prefijos, vuelve a indexar; si sustituyes el GGUF por otro con el mismo nombre, solicita `indexar_proyecto` con `reconstruir=true`. Si falla la generación de embeddings durante una actualización, se conserva el índice anterior.
+
+El MCP indexa archivos UTF-8 de extensiones habituales que Git lista dentro de `MCP_WORKSPACE`: respeta los archivos ignorados **no rastreados**, pero Git incluye archivos ya rastreados aunque coincidan con `.gitignore`. Excluye archivos `.env`, enlaces simbólicos, binarios y archivos de más de 256 KiB. No detecta todos los secretos: revisa qué contiene el proyecto antes de indexar. El índice guarda texto y vectores localmente, y los fragmentos se envían a la API configurada; no uses una API remota si no quieres enviarle el código. Cada MCP apunta a un solo proyecto; cambia `MCP_WORKSPACE` y reinicia el MCP para usar otro. El índice es una ayuda para localizar código, no garantiza que Cline lo consulte ni que encuentre siempre el fragmento correcto.
+
+### Clientes de chat
 
 Usa estos valores en clientes que acepten un proveedor OpenAI-compatible:
 
@@ -175,7 +289,7 @@ models:
 Si definiste `API_KEY`, cambia `apiKey: local` por la misma clave. Si la dejaste vacía, puedes quitar la línea `apiKey`.
 El ejemplo corresponde al agente `desarrollador`: si cambias su contexto o su límite de salida, ajusta también estos valores en Continue.
 
-Para que Continue liste todos tus agentes sin escribirlos uno por uno, usa `model: AUTODETECT`. Continue consulta `/v1/models` y muestra cada agente de `config/agentes/` como un modelo seleccionable:
+Para que Continue liste todos tus agentes sin escribirlos uno por uno, usa `model: AUTODETECT`. Continue consulta `/v1/models`, que incluye cada agente de `config/agentes/` y, si está configurado, el identificador de embeddings:
 
 ```yaml
 models:
@@ -364,7 +478,8 @@ Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF 
 | GET | `/models` | Listar archivos GGUF disponibles |
 | GET | `/agents` | Listar agentes configurados |
 | GET | `/agents/{agent_id}` | Consultar la configuración de un agente |
-| GET | `/v1/models` | Listar agentes para clientes OpenAI-compatible |
+| GET | `/v1/models` | Listar agentes y el modelo de embeddings configurado |
+| POST | `/v1/embeddings` | Generar embeddings con el modelo dedicado opcional |
 | POST | `/agents/{agent_id}/start` | Precargar un agente (opcional) |
 | GET | `/engine/status` | Consultar el estado del motor |
 | POST | `/engine/stop` | Detener el modelo activo |
@@ -381,6 +496,7 @@ Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicit
 - **La API no arranca:** confirma que instalaste las dependencias en `.venv` y que el puerto `8000` está libre.
 - **No encuentra llama.cpp:** comprueba que `llama-server.exe` esté en una carpeta `llama*`, en el `PATH` o en la ruta indicada por `LLAMA_SERVER_PATH`.
 - **No aparece el agente o modelo:** consulta `GET /agents` y `GET /models`. Revisa que el valor `modelo` del YAML coincida con el nombre del GGUF y que `MODELS_DIR` apunte a la carpeta correcta.
+- **No funcionan los embeddings:** confirma que `EMBEDDINGS_MODEL` coincide con el nombre de un GGUF disponible y que el puerto de `EMBEDDINGS_PORT` esté libre. Revisa `logs/llama-server-embeddings.log`.
 - **Error 401:** configura la misma clave en `.env` y en la aplicación cliente, con el prefijo `Bearer`.
 - **Error de conexión desde una extensión:** verifica que Uvicorn siga activo, que la URL use el puerto `8000` y que la extensión tenga permiso para conectarse a `127.0.0.1`.
 - **Falla la búsqueda web:** comprueba que SearXNG esté en ejecución, que `SEARXNG_URL` sea accesible desde este equipo y que su búsqueda responda en JSON.

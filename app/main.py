@@ -16,16 +16,32 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.nucleo.config import API_KEY, INFERENCE_TIMEOUT_MINUTES, LLAMA_URL, WEB_SEARCH_ENABLED
+from app.nucleo.config import (
+    API_KEY,
+    EMBEDDINGS_CTX_SIZE,
+    EMBEDDINGS_GPU_LAYERS,
+    EMBEDDINGS_HOST,
+    EMBEDDINGS_MODEL,
+    EMBEDDINGS_PORT,
+    INFERENCE_TIMEOUT_MINUTES,
+    LLAMA_URL,
+    WEB_SEARCH_ENABLED,
+)
 from app.servicios.busqueda import buscar_en_searxng
 from app.servicios.coordinador import Coordinador
-from app.servicios.motor_inferencia import motor
+from app.servicios.motor_inferencia import MotorInferencia, motor
 from app.servicios.payload import _texto, construir_payload
 from app.servicios.registro_agentes import listar_agentes, obtener_agente
 from app.servicios.registro_modelos import listar_modelos
 from app.servicios.skills import NOMBRE_SKILL, elegir_skill, listar_skills, skills_del_agente
 
 coordinador = Coordinador(motor)
+motor_embeddings = MotorInferencia(
+    host=EMBEDDINGS_HOST,
+    port=EMBEDDINGS_PORT,
+    embedding=True,
+    log_name="llama-server-embeddings.log",
+)
 logger = logging.getLogger("uvicorn.error")
 
 MAX_ITERACIONES_HERRAMIENTAS = 3
@@ -179,6 +195,7 @@ async def lifespan(app: FastAPI):
     finally:
         await app.state.http.aclose()
         await asyncio.to_thread(motor.detener)
+        await asyncio.to_thread(motor_embeddings.detener)
 
 
 # --- Seguridad -----------------------------------------------------------------
@@ -326,24 +343,106 @@ def _contexto_por_slot(agente: dict) -> int:
 
 @protegido.get("/v1/models")
 def listar_modelos_api():
+    datos = [
+        {
+            "id": agente["id"],
+            "object": "model",
+            "created": 0,
+            "owned_by": "servidor-agente-local",
+            "context_length": _contexto_por_slot(agente),
+            "max_model_len": _contexto_por_slot(agente),
+            "max_tokens": agente["parametros"]["max_tokens"],
+        }
+        for agente in _agentes_o_error()
+    ]
+
+    if EMBEDDINGS_MODEL and all(
+        modelo["id"] != EMBEDDINGS_MODEL for modelo in datos
+    ):
+        datos.append({
+            "id": EMBEDDINGS_MODEL,
+            "object": "model",
+            "created": 0,
+            "owned_by": "servidor-agente-local",
+        })
+
     return {
         "object": "list",
-        "data": [
-            {
-                "id": agente["id"],
-                "object": "model",
-                "created": 0,
-                "owned_by": "servidor-agente-local",
-                "context_length": _contexto_por_slot(agente),
-                "max_model_len": _contexto_por_slot(agente),
-                "max_tokens": agente["parametros"]["max_tokens"],
-            }
-            for agente in _agentes_o_error()
-        ],
+        "data": datos,
     }
 
 
 # --- Chat (compatible con OpenAI) -------------------------------------------------
+
+@protegido.post("/v1/embeddings")
+async def crear_embeddings(request: Request, solicitud: dict):
+    if not EMBEDDINGS_MODEL:
+        raise HTTPException(
+            status_code=503,
+            detail="Configura EMBEDDINGS_MODEL con el nombre de un modelo GGUF.",
+        )
+
+    if solicitud.get("model") != EMBEDDINGS_MODEL:
+        raise HTTPException(
+            status_code=404,
+            detail=f"El modelo de embeddings disponible es '{EMBEDDINGS_MODEL}'.",
+        )
+
+    if "input" not in solicitud:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes proporcionar el campo input.",
+        )
+
+    agente_embeddings = {
+        "id": "embeddings",
+        "modelo": EMBEDDINGS_MODEL,
+        "motor": {
+            "gpu_layers": EMBEDDINGS_GPU_LAYERS,
+            "ctx_size": EMBEDDINGS_CTX_SIZE,
+            "batch_size": EMBEDDINGS_CTX_SIZE,
+            "ubatch_size": EMBEDDINGS_CTX_SIZE,
+            "parallel": 1,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "f16",
+        },
+    }
+
+    try:
+        await asyncio.to_thread(motor_embeddings.asegurar, agente_embeddings)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    payload = dict(solicitud)
+    payload["model"] = "local"
+    cliente: httpx.AsyncClient = request.app.state.http
+
+    try:
+        respuesta = await cliente.post(
+            f"{motor_embeddings.url}/v1/embeddings",
+            json=payload,
+        )
+    except httpx.TimeoutException as error:
+        raise HTTPException(
+            status_code=504,
+            detail="El motor de embeddings excedio el tiempo de espera.",
+        ) from error
+    except httpx.RequestError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo conectar con llama.cpp para embeddings: {error}",
+        ) from error
+
+    cuerpo = respuesta.content
+    await respuesta.aclose()
+    if respuesta.status_code >= 400:
+        return _error_motor(respuesta.status_code, cuerpo)
+
+    return Response(
+        content=cuerpo,
+        status_code=respuesta.status_code,
+        media_type=respuesta.headers.get("content-type", "application/json"),
+    )
 
 def _error_motor(codigo: int, cuerpo: bytes) -> JSONResponse:
     """Reenvía un error de llama-server; si ya viene en formato OpenAI se

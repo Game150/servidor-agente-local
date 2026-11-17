@@ -30,7 +30,10 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.ASGITransport(app=main.app),
             base_url="http://testserver",
         ) as cliente:
-            with patch("app.main._agentes_o_error", return_value=agentes):
+            with (
+                patch("app.main._agentes_o_error", return_value=agentes),
+                patch("app.main.EMBEDDINGS_MODEL", ""),
+            ):
                 respuesta = await cliente.get("/v1/models")
 
         self.assertEqual(respuesta.status_code, 200)
@@ -41,6 +44,23 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(respuesta.json()["data"][0]["context_length"], 4096)
         self.assertEqual(respuesta.json()["data"][0]["max_tokens"], 256)
+
+    async def test_models_lists_embeddings_model_when_configured(self):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://testserver",
+        ) as cliente:
+            with (
+                patch("app.main._agentes_o_error", return_value=[]),
+                patch("app.main.EMBEDDINGS_MODEL", "nomic-embed-text"),
+            ):
+                respuesta = await cliente.get("/v1/models")
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(
+            [modelo["id"] for modelo in respuesta.json()["data"]],
+            ["nomic-embed-text"],
+        )
 
     async def test_chat_completion_routes_agent_and_preserves_openai_response(self):
         agente = {
@@ -151,6 +171,83 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(respuesta.status_code, 404)
         self.assertEqual(respuesta.json()["error"]["type"], "not_found_error")
+
+    async def test_embeddings_uses_separate_model_and_preserves_response(self):
+        respuesta_embeddings = {
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": "nomic-embed-text",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+        }
+        peticiones_motor = []
+
+        def responder_motor(peticion):
+            peticiones_motor.append((str(peticion.url), json.loads(peticion.content)))
+            return httpx.Response(200, json=respuesta_embeddings)
+
+        cliente_anterior = getattr(main.app.state, "http", None)
+        cliente_motor = httpx.AsyncClient(
+            transport=httpx.MockTransport(responder_motor),
+        )
+        main.app.state.http = cliente_motor
+
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app),
+                base_url="http://testserver",
+            ) as cliente:
+                with (
+                    patch("app.main.EMBEDDINGS_MODEL", "nomic-embed-text"),
+                    patch.object(main.motor_embeddings, "asegurar") as asegurar,
+                    patch.object(
+                        main.motor_embeddings,
+                        "url",
+                        "http://127.0.0.1:8081",
+                    ),
+                ):
+                    respuesta = await cliente.post(
+                        "/v1/embeddings",
+                        json={
+                            "model": "nomic-embed-text",
+                            "input": ["hola"],
+                            "encoding_format": "float",
+                        },
+                    )
+
+            self.assertEqual(respuesta.status_code, 200)
+            self.assertEqual(respuesta.json(), respuesta_embeddings)
+            self.assertEqual(
+                peticiones_motor,
+                [(
+                    "http://127.0.0.1:8081/v1/embeddings",
+                    {
+                        "model": "local",
+                        "input": ["hola"],
+                        "encoding_format": "float",
+                    },
+                )],
+            )
+            asegurar.assert_called_once()
+        finally:
+            await cliente_motor.aclose()
+            if cliente_anterior is None:
+                del main.app.state.http
+            else:
+                main.app.state.http = cliente_anterior
+
+    async def test_embeddings_requires_configured_model(self):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://testserver",
+        ) as cliente:
+            with patch("app.main.EMBEDDINGS_MODEL", ""):
+                respuesta = await cliente.post(
+                    "/v1/embeddings",
+                    json={"model": "local", "input": "hola"},
+                )
+
+        self.assertEqual(respuesta.status_code, 503)
+        self.assertEqual(respuesta.json()["error"]["type"], "server_error")
 
     async def test_streaming_returns_server_sent_events(self):
         fragmento = b"data: [DONE]\n\n"
