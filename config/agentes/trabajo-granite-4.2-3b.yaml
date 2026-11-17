@@ -62,4 +62,4 @@ motor:
   # Formato de la caché de valores; puede afectar memoria, rendimiento y precisión.
   cache_type_v: q5_1
   # Flash Attention: "on", "off" o "auto", según compatibilidad del modelo y backend.
-  flash_attn: "auto"
+  flash_attn: "on"

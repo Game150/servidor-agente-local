@@ -134,6 +134,48 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
             else:
                 main.app.state.http = cliente_anterior
 
+    async def test_chat_completion_preserva_imagen_en_mensaje(self):
+        agente = {
+            "id": "vision",
+            "system_prompt": "Describe la imagen.",
+            "motor": {"ctx_size": 8192, "parallel": 1},
+            "parametros": {"max_tokens": 64},
+        }
+        imagen = {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZmFrZQ=="}}
+        peticiones_motor = []
+
+        def responder_motor(peticion):
+            peticiones_motor.append(json.loads(peticion.content))
+            return httpx.Response(200, json={
+                "choices": [{"finish_reason": "stop", "message": {"content": "Respuesta"}}],
+            })
+
+        anterior = getattr(main.app.state, "http", None)
+        main.app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(responder_motor))
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://testserver",
+            ) as cliente:
+                with (
+                    patch("app.main._agente_o_error", return_value=agente),
+                    patch("app.main._preparar_motor", new=AsyncMock()),
+                    patch.object(main.coordinador, "liberar", new=AsyncMock()),
+                ):
+                    respuesta = await cliente.post("/v1/chat/completions", json={
+                        "model": "vision",
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": "¿Qué hay en la imagen?"}, imagen,
+                        ]}],
+                    })
+            self.assertEqual(respuesta.status_code, 200)
+            self.assertIn(imagen, peticiones_motor[0]["messages"][-1]["content"])
+        finally:
+            await main.app.state.http.aclose()
+            if anterior is None:
+                del main.app.state.http
+            else:
+                main.app.state.http = anterior
+
     async def test_api_key_uses_bearer_authentication(self):
         main.app.dependency_overrides.pop(main.verificar_clave, None)
 

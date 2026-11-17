@@ -481,6 +481,16 @@ motor:
 
 Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF para crear otros agentes.
 
+### Imágenes con Gemma 4 E4B
+
+El agente `trabajo-gemma-4-e4b` necesita, además del modelo, el proyector visual
+`mmproj-F16.gguf` de [Unsloth Gemma 4 E4B](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF).
+Guárdalo como `proyectores\mmproj-F16.gguf` en la raíz del proyecto y
+ajusta en el YAML del agente la ruta absoluta que sigue a `--mmproj` en `motor.extra_args`.
+El directorio `proyectores` está excluido de Git. Si falta el archivo, el agente no arrancará;
+descárgalo o quita `--mmproj` y su ruta para usar solo texto. El proyector y las imágenes consumen memoria
+adicional y requieren una versión de llama.cpp compatible.
+
 ## Endpoints disponibles
 
 | Método | Endpoint | Función |
@@ -508,6 +518,7 @@ Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicit
 - **No encuentra llama.cpp:** comprueba que `llama-server.exe` esté en una carpeta `llama*`, en el `PATH` o en la ruta indicada por `LLAMA_SERVER_PATH`.
 - **No aparece el agente o modelo:** consulta `GET /agents` y `GET /models`. Revisa que el valor `modelo` del YAML coincida con el nombre del GGUF y que `MODELS_DIR` apunte a la carpeta correcta.
 - **No funcionan los embeddings:** confirma que `EMBEDDINGS_MODEL` coincide con el nombre de un GGUF disponible y que el puerto de `EMBEDDINGS_PORT` esté libre. Revisa `logs/llama-server-embeddings.log`.
+- **Error al enviar imágenes:** verifica que el agente use un modelo multimodal y tenga un proyector `--mmproj` compatible y existente en `motor.extra_args`. Revisa `logs/llama-server.log`.
 - **Error 401:** configura la misma clave en `.env` y en la aplicación cliente, con el prefijo `Bearer`.
 - **Error de conexión desde una extensión:** verifica que Uvicorn siga activo, que la URL use el puerto `8000` y que la extensión tenga permiso para conectarse a `127.0.0.1`.
 - **Falla la búsqueda web:** comprueba que SearXNG esté en ejecución, que `SEARXNG_URL` sea accesible desde este equipo y que su búsqueda responda en JSON.

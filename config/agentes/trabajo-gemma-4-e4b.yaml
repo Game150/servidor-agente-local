@@ -40,7 +40,7 @@ motor:
   ubatch_size: 256
   gpu_layers: 99
   threads: 6
-  extra_args: ["--threads-batch", "6"]
+  extra_args: ["--threads-batch", "6", "--mmproj", 'M:\Projecto-IA\servidor-agente-local\proyectores\mmproj-F16.gguf']
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0
