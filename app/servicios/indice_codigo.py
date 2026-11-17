@@ -59,6 +59,8 @@ class IndiceCodigo:
             resultado = subprocess.run(
                 ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                 cwd=self.proyecto,
+                # La entrada del proceso MCP pertenece al protocolo y no a Git.
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,

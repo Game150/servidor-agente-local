@@ -1,7 +1,10 @@
 """Servidor MCP stdio para buscar código en un proyecto configurado."""
 
+import logging
 import os
+import time
 from functools import lru_cache
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -10,6 +13,25 @@ from app.nucleo.config import API_KEY, EMBEDDINGS_MODEL, LOG_DIR
 from app.servicios.indice_codigo import IndiceCodigo
 
 mcp = FastMCP("busqueda-codigo-local")
+
+# Solo a archivo: stdout es el canal del protocolo MCP y no puede usarse para logs.
+logger = logging.getLogger("mcp_busqueda")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _manejador = RotatingFileHandler(
+        LOG_DIR / "mcp-busqueda.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+    )
+    _manejador.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(_manejador)
+except OSError:
+    logger.addHandler(logging.NullHandler())
+logger.info(
+    "MCP iniciado: workspace=%s api=%s modelo_embeddings=%s",
+    os.getenv("MCP_WORKSPACE", "(sin definir)"), os.getenv("MCP_API_URL", "http://127.0.0.1:8000"),
+    EMBEDDINGS_MODEL or "(sin definir)",
+)
 
 
 @lru_cache(maxsize=1)
@@ -36,13 +58,36 @@ def _indice() -> IndiceCodigo:
 @mcp.tool()
 def indexar_proyecto(reconstruir: bool = False) -> dict:
     """Actualiza el índice local del proyecto; reconstruir=true recalcula todos los vectores."""
-    return _indice().indexar(reconstruir)
+    inicio = time.monotonic()
+    logger.info("indexar_proyecto: inicio reconstruir=%s", reconstruir)
+    try:
+        resultado = _indice().indexar(reconstruir)
+    except Exception as error:
+        logger.error("indexar_proyecto: fallo (%s) %s (%.1f s)", type(error).__name__, error, time.monotonic() - inicio)
+        raise
+    logger.info("indexar_proyecto: listo %s (%.1f s)", resultado, time.monotonic() - inicio)
+    return resultado
 
 
 @mcp.tool()
 def buscar_codigo(consulta: str, limite: int = 3) -> list[dict]:
     """Busca por significado y devuelve hasta cinco fragmentos del proyecto indexado."""
-    return _indice().buscar(consulta, limite)
+    inicio = time.monotonic()
+    texto = " ".join(str(consulta).split())
+    logger.info("buscar_codigo: consulta=%r limite=%s", texto[:80], limite)
+    try:
+        resultados = _indice().buscar(consulta, limite)
+    except Exception as error:
+        logger.error("buscar_codigo: fallo (%s) %s (%.1f s)", type(error).__name__, error, time.monotonic() - inicio)
+        raise
+    logger.info(
+        "buscar_codigo: %d resultados, similitud_max=%s, rutas=%s (%.1f s)",
+        len(resultados),
+        resultados[0]["similitud"] if resultados else "n/a",
+        ", ".join(f"{r['ruta']}:{r['linea_inicio']}" for r in resultados),
+        time.monotonic() - inicio,
+    )
+    return resultados
 
 
 if __name__ == "__main__":

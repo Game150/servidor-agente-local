@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -27,6 +28,7 @@ from app.nucleo.config import (
     LLAMA_URL,
     WEB_SEARCH_ENABLED,
 )
+from app.nucleo.registro import solicitud_id, solicitud_inicio
 from app.servicios.busqueda import buscar_en_searxng
 from app.servicios.coordinador import Coordinador
 from app.servicios.motor_inferencia import MotorInferencia, motor
@@ -114,11 +116,13 @@ def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> Non
     else:
         ocupacion = "no disponible"
     motivo = motivo if motivo in ("stop", "length", "tool_calls", "content_filter") else "no disponible"
+    inicio = solicitud_inicio.get()
+    duracion = f" duracion_s={time.monotonic() - inicio:.1f}" if inicio is not None else ""
     logger.info(
         "Consumo de inferencia final: entrada=%s salida=%s total=%s contexto_por_slot=%s ocupacion=%s motivo=%s "
-        "prompt_tokens_s=%s generacion_tokens_s=%s",
+        "prompt_tokens_s=%s generacion_tokens_s=%s%s",
         valor(entrada), valor(salida), valor(total), valor(contexto), ocupacion, motivo,
-        velocidad("prompt_per_second"), velocidad("predicted_per_second"),
+        velocidad("prompt_per_second"), velocidad("predicted_per_second"), duracion,
     )
 
 
@@ -599,6 +603,12 @@ def _es_herramienta_interna(llamada: dict, skills: dict) -> bool:
     )
 
 
+def _nombres_herramientas(llamadas: list) -> str:
+    return ", ".join(
+        str(llamada.get("function", {}).get("name", "?")) for llamada in llamadas if isinstance(llamada, dict)
+    )
+
+
 async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, skills: dict) -> list:
     validadas = []
     identificadores = set()
@@ -835,8 +845,13 @@ async def _completar_sin_stream(
                 detail="El modelo supero el limite de llamadas de herramientas por solicitud.",
             )
 
+        inicio_herramientas = time.monotonic()
         mensajes_herramienta = await _ejecutar_herramientas(cliente, tool_calls, skills)
-
+        logger.info(
+            "Vuelta %d/%d: herramientas internas [%s] (%.1f s)",
+            iteracion + 1, MAX_ITERACIONES_HERRAMIENTAS, _nombres_herramientas(tool_calls),
+            time.monotonic() - inicio_herramientas,
+        )
         payload["messages"].append(mensaje)
         payload["messages"].extend(mensajes_herramienta)
         total_llamadas += len(tool_calls)
@@ -1221,7 +1236,13 @@ async def _completar_con_stream(
             return
 
         try:
+            inicio_herramientas = time.monotonic()
             mensajes_herramienta = await _ejecutar_herramientas(cliente, llamadas, skills)
+            logger.info(
+                "Vuelta %d/%d: herramientas internas [%s] (%.1f s)",
+                iteracion + 1, MAX_ITERACIONES_HERRAMIENTAS, _nombres_herramientas(llamadas),
+                time.monotonic() - inicio_herramientas,
+            )
         except HTTPException as error:
             yield _error_sse(error.status_code, str(error.detail))
             return
@@ -1290,6 +1311,11 @@ async def completar_chat(request: Request, solicitud: dict):
 
     agente = _agente_o_error(identificador)
 
+    solicitud_id.set(secrets.token_hex(2))
+    solicitud_inicio.set(time.monotonic())
+    identificador_solicitud = solicitud_id.get()
+    inicio_solicitud = solicitud_inicio.get()
+
     mensajes = solicitud.get("messages")
 
     if not isinstance(mensajes, list) or not mensajes:
@@ -1297,6 +1323,10 @@ async def completar_chat(request: Request, solicitud: dict):
             status_code=400,
             detail="Debes proporcionar una lista de mensajes.",
         )
+    logger.info(
+        "Solicitud: agente=%s modelo=%s stream=%s mensajes=%d",
+        agente.get("id"), agente.get("modelo"), bool(solicitud.get("stream", False)), len(mensajes),
+    )
     payload = construir_payload(agente, solicitud)
     skills = _preparar_skills(payload, agente.get("id"))
     _agregar_herramienta_busqueda(payload, skills)
@@ -1351,6 +1381,8 @@ async def completar_chat(request: Request, solicitud: dict):
     if solicitud.get("stream", False):
 
         async def transmitir():
+            solicitud_id.set(identificador_solicitud)
+            solicitud_inicio.set(inicio_solicitud)
             try:
                 async for fragmento in _completar_con_stream(
                     cliente,

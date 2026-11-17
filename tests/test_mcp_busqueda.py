@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -63,14 +64,23 @@ class McpBusquedaTests(unittest.IsolatedAsyncioTestCase):
                             {herramienta.name for herramienta in herramientas.tools},
                             {"indexar_proyecto", "buscar_codigo"},
                         )
-                        antes = await sesion.call_tool("buscar_codigo", {"consulta": "login"})
+                        antes = await asyncio.wait_for(
+                            sesion.call_tool("buscar_codigo", {"consulta": "login"}), timeout=30
+                        )
                         self.assertTrue(antes.isError)
-                        indexado = await sesion.call_tool("indexar_proyecto", {})
+                        indexado = await asyncio.wait_for(
+                            sesion.call_tool("indexar_proyecto", {}), timeout=30
+                        )
                         self.assertFalse(indexado.isError)
-                        resultado = await sesion.call_tool("buscar_codigo", {"consulta": "login"})
+                        resultado = await asyncio.wait_for(
+                            sesion.call_tool("buscar_codigo", {"consulta": "login"}), timeout=30
+                        )
                         self.assertFalse(resultado.isError)
                         self.assertIn("auth.py", resultado.content[0].text)
                         self.assertIn("def login", resultado.content[0].text)
+                log = (Path(temporal) / "logs" / "mcp-busqueda.log").read_text(encoding="utf-8")
+                self.assertIn("indexar_proyecto: listo", log)
+                self.assertIn("buscar_codigo: 1 resultados", log)
             finally:
                 servidor.shutdown()
                 servidor.server_close()
