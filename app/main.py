@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import secrets
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 
@@ -19,6 +20,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.nucleo.config import (
     API_KEY,
+    CODE_SEARCH_DOCUMENT_PREFIX,
+    CODE_SEARCH_ENABLED,
+    CODE_SEARCH_QUERY_PREFIX,
+    CODE_SEARCH_WORKSPACE,
     EMBEDDINGS_CTX_SIZE,
     EMBEDDINGS_GPU_LAYERS,
     EMBEDDINGS_HOST,
@@ -26,11 +31,13 @@ from app.nucleo.config import (
     EMBEDDINGS_PORT,
     INFERENCE_TIMEOUT_MINUTES,
     LLAMA_URL,
+    LOG_DIR,
     WEB_SEARCH_ENABLED,
 )
 from app.nucleo.registro import solicitud_id, solicitud_inicio
 from app.servicios.busqueda import buscar_en_searxng
 from app.servicios.coordinador import Coordinador
+from app.servicios.indice_codigo import IndiceCodigo, MAX_FRAGMENTO, MAX_RESULTADOS
 from app.servicios.motor_inferencia import MotorInferencia, motor
 from app.servicios.payload import _texto, construir_payload
 from app.servicios.registro_agentes import listar_agentes, obtener_agente
@@ -49,6 +56,7 @@ logger = logging.getLogger("uvicorn.error")
 MAX_ITERACIONES_HERRAMIENTAS = 3
 MAX_LLAMADAS_HERRAMIENTAS = 3
 MAX_CARACTERES_ARGUMENTOS = 2_000
+MAX_ARGUMENTOS_CODIGO = MAX_FRAGMENTO * 12 + 128
 
 
 def _aviso_contexto(tokens: int, contexto: int | None) -> str:
@@ -95,7 +103,7 @@ def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> Non
         except OverflowError:
             return "no disponible"
 
-    entrada = salida = None
+    entrada = salida = cache = prompt = None
     if isinstance(uso, dict):
         entrada = entero(uso.get("prompt_tokens"))
         salida = entero(uso.get("completion_tokens"))
@@ -120,9 +128,9 @@ def _registrar_consumo(datos: dict, contexto: int | None, motivo: object) -> Non
     duracion = f" duracion_s={time.monotonic() - inicio:.1f}" if inicio is not None else ""
     logger.info(
         "Consumo de inferencia final: entrada=%s salida=%s total=%s contexto_por_slot=%s ocupacion=%s motivo=%s "
-        "prompt_tokens_s=%s generacion_tokens_s=%s%s",
+        "prompt_tokens_s=%s generacion_tokens_s=%s cache_tokens=%s prompt_nuevos=%s%s",
         valor(entrada), valor(salida), valor(total), valor(contexto), ocupacion, motivo,
-        velocidad("prompt_per_second"), velocidad("predicted_per_second"), duracion,
+        velocidad("prompt_per_second"), velocidad("predicted_per_second"), valor(cache), valor(prompt), duracion,
     )
 
 
@@ -167,6 +175,26 @@ HERRAMIENTA_SKILL = {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "Nombre de la skill."}},
             "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+HERRAMIENTA_BUSQUEDA_CODIGO = {
+    "type": "function",
+    "function": {
+        "name": "buscar_codigo",
+        "description": (
+            "Busca por significado fragmentos del proyecto indexado. "
+            "Los resultados pueden estar desactualizados; confirma en los archivos."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string", "minLength": 1, "maxLength": MAX_FRAGMENTO},
+                "limite": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTADOS},
+            },
+            "required": ["consulta"],
             "additionalProperties": False,
         },
     },
@@ -398,24 +426,7 @@ async def crear_embeddings(request: Request, solicitud: dict):
             detail="Debes proporcionar el campo input.",
         )
 
-    agente_embeddings = {
-        "id": "embeddings",
-        "modelo": EMBEDDINGS_MODEL,
-        "motor": {
-            "gpu_layers": EMBEDDINGS_GPU_LAYERS,
-            "ctx_size": EMBEDDINGS_CTX_SIZE,
-            "batch_size": EMBEDDINGS_CTX_SIZE,
-            "ubatch_size": EMBEDDINGS_CTX_SIZE,
-            "parallel": 1,
-            "cache_type_k": "q8_0",
-            "cache_type_v": "f16",
-        },
-    }
-
-    try:
-        await asyncio.to_thread(motor_embeddings.asegurar, agente_embeddings)
-    except (FileNotFoundError, RuntimeError) as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+    await _asegurar_motor_embeddings()
 
     payload = dict(solicitud)
     payload["model"] = "local"
@@ -448,6 +459,27 @@ async def crear_embeddings(request: Request, solicitud: dict):
         media_type=respuesta.headers.get("content-type", "application/json"),
     )
 
+
+async def _asegurar_motor_embeddings() -> None:
+    agente_embeddings = {
+        "id": "embeddings",
+        "modelo": EMBEDDINGS_MODEL,
+        "motor": {
+            "gpu_layers": EMBEDDINGS_GPU_LAYERS,
+            "ctx_size": EMBEDDINGS_CTX_SIZE,
+            "batch_size": EMBEDDINGS_CTX_SIZE,
+            "ubatch_size": EMBEDDINGS_CTX_SIZE,
+            "parallel": 1,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "f16",
+        },
+    }
+
+    try:
+        await asyncio.to_thread(motor_embeddings.asegurar, agente_embeddings)
+    except (FileNotFoundError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
 def _error_motor(codigo: int, cuerpo: bytes) -> JSONResponse:
     """Reenvía un error de llama-server; si ya viene en formato OpenAI se
     deja tal cual."""
@@ -462,7 +494,9 @@ def _error_motor(codigo: int, cuerpo: bytes) -> JSONResponse:
     return _respuesta_error(codigo, cuerpo.decode("utf-8", errors="replace"))
 
 
-def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> None:
+def _agregar_herramienta_busqueda(
+    payload: dict, skills: dict | None = None, codigo: bool = False
+) -> None:
     herramientas = payload.get("tools", [])
     if herramientas is None:
         herramientas = []
@@ -479,6 +513,7 @@ def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> 
         if isinstance(funcion, dict) and (
             (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
             or (skills and funcion.get("name") == "cargar_skill")
+            or (codigo and funcion.get("name") == "buscar_codigo")
         ):
             raise HTTPException(
                 status_code=400,
@@ -486,6 +521,8 @@ def _agregar_herramienta_busqueda(payload: dict, skills: dict | None = None) -> 
             )
 
     internas = [HERRAMIENTA_SKILL] if skills else []
+    if codigo:
+        internas.append(HERRAMIENTA_BUSQUEDA_CODIGO)
     if WEB_SEARCH_ENABLED:
         internas.append(HERRAMIENTA_BUSQUEDA_WEB)
     if herramientas or internas:
@@ -539,18 +576,30 @@ def _texto_ultima_peticion(mensajes: list) -> str:
     for mensaje in reversed(mensajes):
         if isinstance(mensaje, dict) and mensaje.get("role") == "user":
             texto = _texto(mensaje.get("content"))
-            texto = re.sub(r"<environment_details>.*?</environment_details>", "", texto, flags=re.S)
-            partes = re.findall(r"<(?:task|feedback|user_message)>(.*?)</(?:task|feedback|user_message)>", texto, flags=re.S)
-            return ("\n".join(partes) if partes else texto)[:2000]
+            texto = re.sub(
+                r"<(environment_details|hook_context|tool_result)\b[^>]*>.*?</\1\s*>",
+                "", texto, flags=re.S,
+            )
+            partes = re.findall(
+                r"<(task|feedback|user_message|user_input)\b[^>]*>(.*?)</\1\s*>",
+                texto, flags=re.S,
+            )
+            peticion = ("\n".join(parte for _, parte in partes) if partes else texto).strip()
+            if peticion:
+                return peticion[:2000]
     return ""
 
 
-def _bloque_herramientas(skills: dict, cargadas: frozenset = frozenset()) -> str:
+def _bloque_herramientas(
+    skills: dict, cargadas: frozenset = frozenset(), codigo: bool = False
+) -> str:
     lineas = [
         "Herramientas disponibles. Analiza primero la petición completa y usa solo las herramientas que necesites.",
     ]
     if WEB_SEARCH_ENABLED:
         lineas.append(f"- buscar_en_web: {HERRAMIENTA_BUSQUEDA_WEB['function']['description']}")
+    if codigo:
+        lineas.append(f"- buscar_codigo: {HERRAMIENTA_BUSQUEDA_CODIGO['function']['description']}")
     if skills:
         lineas.append(
             "Si la tarea principal coincide claramente con la descripción de una skill, llama cargar_skill antes de "
@@ -570,8 +619,8 @@ def _bloque_herramientas(skills: dict, cargadas: frozenset = frozenset()) -> str
     return "\n".join(lineas)
 
 
-def _inyectar_herramientas(payload: dict, skills: dict) -> None:
-    if not WEB_SEARCH_ENABLED and not skills:
+def _inyectar_herramientas(payload: dict, skills: dict, codigo: bool = False) -> None:
+    if not WEB_SEARCH_ENABLED and not skills and not codigo:
         return
     indices = [
         i for i, mensaje in enumerate(payload["messages"])
@@ -586,7 +635,7 @@ def _inyectar_herramientas(payload: dict, skills: dict) -> None:
         nombre for nombre in skills
         if isinstance(sistema, str) and f"Instrucciones de la skill {nombre}:" in sistema
     )
-    bloque = _bloque_herramientas(skills, cargadas)
+    bloque = _bloque_herramientas(skills, cargadas, codigo)
     contenido = mensaje.get("content")
     if isinstance(contenido, list):
         nuevo = [{"type": "text", "text": bloque + "\n\nPregunta:"}, *contenido]
@@ -595,12 +644,26 @@ def _inyectar_herramientas(payload: dict, skills: dict) -> None:
     payload["messages"][i] = {**mensaje, "content": nuevo}
 
 
-def _es_herramienta_interna(llamada: dict, skills: dict) -> bool:
+def _es_herramienta_interna(llamada: dict, skills: dict, codigo: bool = False) -> bool:
     funcion = llamada.get("function")
     return isinstance(funcion, dict) and (
         (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
         or (bool(skills) and funcion.get("name") == "cargar_skill")
+        or (codigo and funcion.get("name") == "buscar_codigo")
     )
+
+def _usar_busqueda_codigo(payload: dict) -> bool:
+    if not CODE_SEARCH_ENABLED:
+        return False
+    herramientas = payload.get("tools")
+    if not isinstance(herramientas, list):
+        return True
+    for herramienta in herramientas:
+        funcion = herramienta.get("function") if isinstance(herramienta, dict) else None
+        nombre = funcion.get("name") if isinstance(funcion, dict) else None
+        if isinstance(nombre, str) and (nombre == "buscar_codigo" or nombre.endswith("__buscar_codigo")):
+            return False
+    return True
 
 
 def _nombres_herramientas(llamadas: list) -> str:
@@ -609,15 +672,19 @@ def _nombres_herramientas(llamadas: list) -> str:
     )
 
 
-async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, skills: dict) -> list:
+async def _ejecutar_herramientas(
+    cliente: httpx.AsyncClient, llamadas: list, skills: dict, codigo: bool = False
+) -> list:
     validadas = []
     identificadores = set()
     for llamada in llamadas:
-        if not isinstance(llamada, dict) or not _es_herramienta_interna(llamada, skills):
+        if not isinstance(llamada, dict) or not _es_herramienta_interna(llamada, skills, codigo):
             raise HTTPException(status_code=502, detail="El modelo devolvio una herramienta invalida.")
         funcion = llamada["function"]
         if funcion["name"] == "buscar_en_web":
             identificador, argumento = _validar_llamadas_busqueda([llamada])[0]
+        elif funcion["name"] == "buscar_codigo":
+            identificador, argumento = _validar_llamada_codigo(llamada)
         else:
             identificador = llamada.get("id")
             argumentos = funcion.get("arguments")
@@ -658,6 +725,8 @@ async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, ski
                 logger.warning("Busqueda web fallida (%s).", type(error).__name__)
                 raise HTTPException(status_code=502, detail="No se pudo completar la busqueda web en SearXNG.") from error
             logger.info("Busqueda web completada.")
+        elif nombre == "buscar_codigo":
+            resultado = await _buscar_codigo_interno(argumento["consulta"], argumento["limite"])
         elif argumento not in skills:
             logger.warning("Skill solicitada no disponible en el catalogo local.")
             resultado = (
@@ -670,6 +739,64 @@ async def _ejecutar_herramientas(cliente: httpx.AsyncClient, llamadas: list, ski
             logger.info("Skill cargada: %s (solicitada por el modelo)", argumento)
         mensajes.append({"role": "tool", "tool_call_id": identificador, "content": resultado})
     return mensajes
+
+
+def _validar_llamada_codigo(llamada: dict) -> tuple[str, dict]:
+    identificador = llamada.get("id")
+    funcion = llamada.get("function")
+    argumentos = funcion.get("arguments") if isinstance(funcion, dict) else None
+    if (
+        llamada.get("type") != "function"
+        or not isinstance(identificador, str)
+        or not identificador
+        or len(identificador) > 128
+        or not isinstance(argumentos, str)
+        or len(argumentos) > MAX_ARGUMENTOS_CODIGO
+    ):
+        raise HTTPException(status_code=502, detail="La llamada a buscar_codigo es invalida.")
+    try:
+        datos = json.loads(argumentos)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=502, detail="Los argumentos de buscar_codigo no contienen JSON valido.") from error
+    if (
+        not isinstance(datos, dict)
+        or not set(datos) <= {"consulta", "limite"}
+        or not isinstance(datos.get("consulta"), str)
+        or not datos["consulta"].strip()
+        or len(datos["consulta"]) > MAX_FRAGMENTO
+        or type(datos.get("limite", 3)) is not int
+        or not 1 <= datos.get("limite", 3) <= MAX_RESULTADOS
+    ):
+        raise HTTPException(status_code=502, detail="Los argumentos de buscar_codigo son invalidos.")
+    return identificador, {"consulta": datos["consulta"].strip(), "limite": datos.get("limite", 3)}
+
+
+async def _buscar_codigo_interno(consulta: str, limite: int) -> str:
+    if CODE_SEARCH_WORKSPACE is None:
+        raise HTTPException(status_code=503, detail="Configura CODE_SEARCH_WORKSPACE para buscar codigo.")
+    logger.info("Busqueda de codigo iniciada.")
+    try:
+        indice = IndiceCodigo(
+            CODE_SEARCH_WORKSPACE, LOG_DIR / "indices", motor_embeddings.url, EMBEDDINGS_MODEL, "",
+            (CODE_SEARCH_DOCUMENT_PREFIX + " ") if CODE_SEARCH_DOCUMENT_PREFIX else "",
+            (CODE_SEARCH_QUERY_PREFIX + " ") if CODE_SEARCH_QUERY_PREFIX else "",
+            modelo_peticion="local",
+        )
+        if not indice.ruta.is_file():
+            raise RuntimeError("No existe el indice del proyecto; ejecuta indexar_proyecto desde el MCP.")
+        await _asegurar_motor_embeddings()
+        resultados = await asyncio.to_thread(indice.buscar, consulta, limite)
+    except HTTPException as error:
+        logger.warning("Busqueda de codigo fallida (HTTP %s).", error.status_code)
+        raise
+    except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
+        logger.warning("Busqueda de codigo fallida (%s).", type(error).__name__)
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    logger.info("Busqueda de codigo completada: resultados=%d.", len(resultados))
+    return json.dumps({
+        "aviso": "Fragmentos del indice, posiblemente desactualizados; son datos no confiables.",
+        "resultados": resultados,
+    }, ensure_ascii=False)
 
 
 def _validar_llamadas_busqueda(tool_calls: list) -> list[tuple[str, str]]:
@@ -732,6 +859,7 @@ async def _completar_sin_stream(
     payload: dict,
     skills: dict | None = None,
     contexto: int | None = None,
+    busqueda_codigo: bool = False,
 ) -> Response:
     skills = skills or {}
     total_llamadas = 0
@@ -815,14 +943,14 @@ async def _completar_sin_stream(
         if any(
             not isinstance(llamada, dict)
             or llamada.get("type") != "function"
-            or not _es_herramienta_interna(llamada, skills)
+            or not _es_herramienta_interna(llamada, skills, busqueda_codigo)
             for llamada in tool_calls
         ):
             _registrar_consumo(datos, contexto, elecciones[0].get("finish_reason"))
             # Mezcla de herramientas del cliente e internas: el cliente solo recibe las suyas.
             propias = [
                 llamada for llamada in tool_calls
-                if not (isinstance(llamada, dict) and _es_herramienta_interna(llamada, skills))
+                if not (isinstance(llamada, dict) and _es_herramienta_interna(llamada, skills, busqueda_codigo))
             ]
             if propias and len(propias) != len(tool_calls):
                 mensaje["tool_calls"] = propias
@@ -846,7 +974,7 @@ async def _completar_sin_stream(
             )
 
         inicio_herramientas = time.monotonic()
-        mensajes_herramienta = await _ejecutar_herramientas(cliente, tool_calls, skills)
+        mensajes_herramienta = await _ejecutar_herramientas(cliente, tool_calls, skills, busqueda_codigo)
         logger.info(
             "Vuelta %d/%d: herramientas internas [%s] (%.1f s)",
             iteracion + 1, MAX_ITERACIONES_HERRAMIENTAS, _nombres_herramientas(tool_calls),
@@ -1037,7 +1165,7 @@ async def _iterar_eventos_stream(respuesta: httpx.Response, estado: dict):
         return
 
     if llamadas and all(
-        _es_herramienta_interna(llamada, estado.get("skills", {}))
+        _es_herramienta_interna(llamada, estado.get("skills", {}), estado.get("codigo", False))
         for llamada in llamadas
     ):
         estado["llamadas_internas"] = llamadas
@@ -1046,7 +1174,7 @@ async def _iterar_eventos_stream(respuesta: httpx.Response, estado: dict):
     skills_activas = estado.get("skills", {})
     internas = {
         indice for indice in estado["llamadas"]
-        if _es_herramienta_interna(estado["llamadas"][indice], skills_activas)
+        if _es_herramienta_interna(estado["llamadas"][indice], skills_activas, estado.get("codigo", False))
     }
     for evento in estado["eventos_retenidos"]:
         if internas:
@@ -1187,6 +1315,7 @@ async def _completar_con_stream(
     respuesta: httpx.Response,
     skills: dict | None = None,
     contexto: int | None = None,
+    busqueda_codigo: bool = False,
 ):
     skills = skills or {}
     total_llamadas = 0
@@ -1198,6 +1327,7 @@ async def _completar_con_stream(
             "vio_tool_calls": False,
             "llamada_invalida": False,
             "skills": skills,
+            "codigo": busqueda_codigo,
             "contexto": contexto,
             "admite_aviso": _admite_aviso(payload),
             "contenido_emitido": False,
@@ -1237,7 +1367,7 @@ async def _completar_con_stream(
 
         try:
             inicio_herramientas = time.monotonic()
-            mensajes_herramienta = await _ejecutar_herramientas(cliente, llamadas, skills)
+            mensajes_herramienta = await _ejecutar_herramientas(cliente, llamadas, skills, busqueda_codigo)
             logger.info(
                 "Vuelta %d/%d: herramientas internas [%s] (%.1f s)",
                 iteracion + 1, MAX_ITERACIONES_HERRAMIENTAS, _nombres_herramientas(llamadas),
@@ -1329,8 +1459,9 @@ async def completar_chat(request: Request, solicitud: dict):
     )
     payload = construir_payload(agente, solicitud)
     skills = _preparar_skills(payload, agente.get("id"))
-    _agregar_herramienta_busqueda(payload, skills)
-    _inyectar_herramientas(payload, skills)
+    codigo = _usar_busqueda_codigo(payload)
+    _agregar_herramienta_busqueda(payload, skills, codigo)
+    _inyectar_herramientas(payload, skills, codigo)
     contexto = _contexto_por_slot(agente)
 
     # Arranca o cambia de modelo si hace falta y reserva un lugar. Desde acá
@@ -1341,7 +1472,7 @@ async def completar_chat(request: Request, solicitud: dict):
 
     if not solicitud.get("stream", False):
         try:
-            return await _completar_sin_stream(cliente, payload, skills, contexto)
+            return await _completar_sin_stream(cliente, payload, skills, contexto, codigo)
         finally:
             await coordinador.liberar()
 
@@ -1390,6 +1521,7 @@ async def completar_chat(request: Request, solicitud: dict):
                     respuesta,
                     skills,
                     contexto,
+                    codigo,
                 ):
                     yield fragmento
             finally:

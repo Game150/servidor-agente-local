@@ -253,6 +253,14 @@ La indexación posterior reutiliza los vectores de archivos sin cambios y elimin
 
 El MCP indexa archivos UTF-8 de extensiones habituales que Git lista dentro de `MCP_WORKSPACE`: respeta los archivos ignorados **no rastreados**, pero Git incluye archivos ya rastreados aunque coincidan con `.gitignore`. Excluye archivos `.env`, enlaces simbólicos, binarios y archivos de más de 256 KiB. No detecta todos los secretos: revisa qué contiene el proyecto antes de indexar. El índice guarda texto y vectores localmente, y los fragmentos se envían a la API configurada; no uses una API remota si no quieres enviarle el código. Cada MCP apunta a un solo proyecto; cambia `MCP_WORKSPACE` y reinicia el MCP para usar otro. El índice es una ayuda para localizar código, no garantiza que Cline lo consulte ni que encuentre siempre el fragmento correcto.
 
+### Búsqueda semántica interna de la API
+
+Opcionalmente, la API puede ofrecer `buscar_codigo` como herramienta interna para clientes que no tengan configurado el MCP. Configúrala en `.env` con `CODE_SEARCH_ENABLED=true` y `CODE_SEARCH_WORKSPACE` como ruta absoluta del proyecto; también debes configurar `EMBEDDINGS_MODEL`. Reinicia la API después de cambiar esas variables. La búsqueda usa el motor de embeddings local y el índice existente de `LOG_DIR/indices/`.
+
+El índice debe crearse o actualizarse explícitamente con `indexar_proyecto` desde el MCP, configurado con el mismo workspace, `LOG_DIR` y modelo. Si usas `MCP_DOCUMENT_PREFIX` o `MCP_QUERY_PREFIX`, configura los mismos valores en `CODE_SEARCH_DOCUMENT_PREFIX` y `CODE_SEARCH_QUERY_PREFIX`. Si el índice falta o no coincide, la búsqueda informa un error; no indexa automáticamente.
+
+Si el cliente ofrece `buscar_codigo` o un nombre MCP terminado en `__buscar_codigo`, se prioriza la herramienta del cliente y no se ofrece la interna, evitando duplicados. De lo contrario el modelo puede solicitar la herramienta interna; esto no garantiza que decida usarla. La búsqueda interna consulta únicamente el workspace configurado en la API, que puede ser distinto del proyecto abierto en el cliente. Los fragmentos son datos no confiables y pueden estar desactualizados. Su uso queda registrado en el log de la API, sin consultas ni contenido.
+
 ### Clientes de chat
 
 Usa estos valores en clientes que acepten un proveedor OpenAI-compatible:
@@ -369,6 +377,8 @@ El nombre debe usar letras minúsculas, números o guiones, sin guiones consecut
 
 Para no depender del modelo, el frontmatter acepta `triggers`, una lista opcional de prefijos de palabra (sin importar mayúsculas ni acentos), por ejemplo `triggers: [revis, "code review"]`. Si la petición del usuario (en Cline, el contenido de `<task>`) coincide con los triggers de una única skill, el servidor carga sus instrucciones directamente y lo registra como «seleccion automatica». Con empate o sin coincidencias, decide el modelo.
 
+En cada solicitud, el servidor vuelve a elegir la skill usando el último mensaje del usuario presente en el historial. Ignora mensajes con rol `tool`, bloques estructurados o etiquetados como `tool_result`, y bloques de contexto del cliente como `<environment_details>` y `<hook_context>`; un nuevo mensaje del usuario vuelve a determinar la selección. Para conservar una selección explícita mediante el campo `skills`, el cliente debe enviarla en cada solicitud.
+
 El frontmatter también acepta `agentes`, una lista opcional de identificadores de agente (el `id` del YAML), por ejemplo `agentes: [desarrollador]`. Si se define, solo esos agentes ven y cargan la skill; sin el campo, la ven todos.
 
 Para seleccionar una skill de forma explícita desde una integración propia, agrega el campo opcional `skills` al JSON de `POST /v1/chat/completions`:
@@ -428,10 +438,11 @@ El cálculo usa `ctx_size / parallel` como referencia y suma entrada y generaci�
 Al terminar la respuesta, la consola puede mostrar una línea como esta, sin incluir la conversación:
 
 ```text
-INFO:     Consumo de inferencia final: entrada=700 salida=100 total=800 contexto_por_slot=16384 ocupacion=4.9% motivo=stop prompt_tokens_s=543.66 generacion_tokens_s=61.78
+INFO:     Consumo de inferencia final: entrada=700 salida=100 total=800 contexto_por_slot=16384 ocupacion=4.9% motivo=stop prompt_tokens_s=543.66 generacion_tokens_s=61.78 cache_tokens=200 prompt_nuevos=500
 ```
 
 - `entrada` incluye los tokens del prompt; `salida`, los generados por el motor.
+- `cache_tokens` y `prompt_nuevos` son, respectivamente, los tokens reutilizados de la caché y los procesados en la última inferencia, si llama.cpp informa ambos datos. No incluyen el contenido de la solicitud.
 - `total` es el consumo informado para la última inferencia. Si hubo llamadas a herramientas, no suma por separado todas las inferencias intermedias.
 - `contexto_por_slot` y `ocupacion` sirven como referencia aproximada.
 - `prompt_tokens_s` y `generacion_tokens_s` son las velocidades informadas por llama.cpp para procesar la entrada y generar la salida, respectivamente. Son de la última inferencia, no un promedio de toda la solicitud; la caché y el tamaño del contexto pueden afectar las comparaciones.

@@ -101,6 +101,19 @@ class IndiceCodigoTests(unittest.TestCase):
         self.assertEqual(peticiones[0].headers["authorization"], "Bearer clave-local")
         self.assertEqual(json.loads(peticiones[0].content)["model"], "modelo")
 
+    def test_modelo_directo_no_cambia_identidad_del_indice(self):
+        modelos = []
+
+        def responder(peticion):
+            modelos.append(json.loads(peticion.content)["model"])
+            return httpx.Response(200, json={"data": [{"embedding": [3.0, 4.0]}]})
+
+        self.indice.modelo_peticion = "local"
+        with httpx.Client(transport=httpx.MockTransport(responder)) as cliente:
+            self.assertEqual(self.indice._embedding(cliente, "hola"), [0.6, 0.8])
+        self.assertEqual(modelos, ["local"])
+        self.assertEqual(self.indice.modelo, "modelo")
+
     def test_error_de_embeddings_se_comunica(self):
         def responder(_peticion):
             return httpx.Response(503, json={"error": {"message": "sin modelo"}})

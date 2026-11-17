@@ -92,6 +92,18 @@ if EMBEDDINGS_CTX_SIZE <= 0:
     raise ValueError("EMBEDDINGS_CTX_SIZE debe ser mayor que 0.")
 if EMBEDDINGS_GPU_LAYERS < 0:
     raise ValueError("EMBEDDINGS_GPU_LAYERS debe ser mayor o igual a 0.")
+
+# Búsqueda semántica interna, sobre un único proyecto configurado explícitamente.
+CODE_SEARCH_ENABLED = _booleano("CODE_SEARCH_ENABLED", False)
+_code_search_workspace = os.getenv("CODE_SEARCH_WORKSPACE", "").strip()
+CODE_SEARCH_WORKSPACE = Path(_code_search_workspace).expanduser() if _code_search_workspace else None
+CODE_SEARCH_DOCUMENT_PREFIX = os.getenv("CODE_SEARCH_DOCUMENT_PREFIX", "").strip()
+CODE_SEARCH_QUERY_PREFIX = os.getenv("CODE_SEARCH_QUERY_PREFIX", "").strip()
+if CODE_SEARCH_ENABLED:
+    if CODE_SEARCH_WORKSPACE is None or not CODE_SEARCH_WORKSPACE.is_absolute():
+        raise ValueError("CODE_SEARCH_WORKSPACE debe ser una ruta absoluta cuando CODE_SEARCH_ENABLED esta activo.")
+    if not EMBEDDINGS_MODEL:
+        raise ValueError("Configura EMBEDDINGS_MODEL para activar CODE_SEARCH_ENABLED.")
 INFERENCE_TIMEOUT_MINUTES = _entero("INFERENCE_TIMEOUT_MINUTES", 0)
 if INFERENCE_TIMEOUT_MINUTES < 0:
     raise ValueError("INFERENCE_TIMEOUT_MINUTES debe ser un entero mayor o igual a 0.")

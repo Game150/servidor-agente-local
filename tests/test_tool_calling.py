@@ -1,7 +1,11 @@
 import asyncio
 import json
+import subprocess
+import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -10,6 +14,7 @@ from starlette.requests import Request
 
 from app import main
 from app.servicios.coordinador import Coordinador
+from app.servicios.indice_codigo import IndiceCodigo
 
 
 def respuesta_herramienta(nombre="buscar_en_web", argumentos='{"query":"novedades"}'):
@@ -36,6 +41,236 @@ def evento_sse(datos):
 
 
 class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_api_busca_indice_con_motor_de_embeddings(self):
+        requests_embeddings = []
+
+        class EmbeddingsHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests_embeddings.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = json.dumps({"data": [{"embedding": [1.0, 0.0]}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp:
+            proyecto = Path(temp) / "proyecto"
+            proyecto.mkdir()
+            subprocess.run(["git", "init", "-q", str(proyecto)], check=True)
+            (proyecto / "auth.py").write_text("def login(): pass\n", encoding="utf-8")
+            logs = Path(temp) / "logs"
+            indice = IndiceCodigo(proyecto, logs / "indices", "http://localhost", "modelo", "")
+            with patch.object(indice, "_embedding", return_value=[1.0, 0.0]):
+                indice.indexar()
+
+            servidor = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingsHandler)
+            hilo = threading.Thread(target=servidor.serve_forever)
+            hilo.start()
+            peticiones = []
+
+            def responder(request):
+                peticiones.append(json.loads(request.content))
+                if len(peticiones) == 1:
+                    return httpx.Response(200, json=respuesta_herramienta(
+                        nombre="buscar_codigo", argumentos='{"consulta":"login"}'
+                    ))
+                return httpx.Response(200, json={"choices": [{"message": {"content": "Listo"}}]})
+
+            agente = {
+                "id": "desarrollador", "modelo": "modelo-chat", "system_prompt": "Sistema",
+                "motor": {"ctx_size": 8192, "parallel": 1}, "parametros": {},
+            }
+            anterior = getattr(main.app.state, "http", None)
+            overrides = main.app.dependency_overrides.copy()
+            main.app.dependency_overrides[main.verificar_clave] = lambda: None
+            try:
+                async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as motor:
+                    main.app.state.http = motor
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=main.app), base_url="http://testserver"
+                    ) as cliente:
+                        with (
+                            patch("app.main.CODE_SEARCH_ENABLED", True),
+                            patch("app.main.CODE_SEARCH_WORKSPACE", proyecto),
+                            patch("app.main.CODE_SEARCH_DOCUMENT_PREFIX", ""),
+                            patch("app.main.CODE_SEARCH_QUERY_PREFIX", ""),
+                            patch("app.main.LOG_DIR", logs),
+                            patch("app.main.EMBEDDINGS_MODEL", "modelo"),
+                            patch.object(main.motor_embeddings, "url", f"http://127.0.0.1:{servidor.server_port}"),
+                            patch("app.main._asegurar_motor_embeddings", new=AsyncMock()),
+                            patch("app.main._agente_o_error", return_value=agente),
+                            patch("app.main._preparar_motor", new=AsyncMock()),
+                            patch.object(main.coordinador, "liberar", new=AsyncMock()),
+                        ):
+                            respuesta = await cliente.post("/v1/chat/completions", json={
+                                "model": "desarrollador",
+                                "messages": [{"role": "user", "content": "Busca login"}],
+                            })
+                self.assertEqual(respuesta.status_code, 200)
+                self.assertEqual(requests_embeddings[0]["model"], "local")
+                self.assertEqual(requests_embeddings[0]["input"], "login")
+                resultado = json.loads(peticiones[1]["messages"][-1]["content"])
+                self.assertEqual(resultado["resultados"][0]["ruta"], "auth.py")
+                self.assertIn("datos no confiables", resultado["aviso"])
+            finally:
+                if anterior is None:
+                    del main.app.state.http
+                else:
+                    main.app.state.http = anterior
+                main.app.dependency_overrides.clear()
+                main.app.dependency_overrides.update(overrides)
+                servidor.shutdown()
+                servidor.server_close()
+                hilo.join()
+
+    def test_busqueda_codigo_prioriza_la_herramienta_del_cliente(self):
+        with patch("app.main.CODE_SEARCH_ENABLED", True):
+            self.assertTrue(main._usar_busqueda_codigo({"tools": []}))
+            for nombre in ("buscar_codigo", "busqueda-codigo-local__buscar_codigo"):
+                with self.subTest(nombre=nombre):
+                    payload = {"tools": [{"type": "function", "function": {"name": nombre}}]}
+                    self.assertFalse(main._usar_busqueda_codigo(payload))
+                    main._agregar_herramienta_busqueda(payload, {}, codigo=False)
+                    self.assertEqual(payload["tools"][0]["function"]["name"], nombre)
+            self.assertTrue(main._usar_busqueda_codigo({
+                "tools": [{"type": "function", "function": {"name": "otra_herramienta"}}]
+            }))
+        with patch("app.main.CODE_SEARCH_ENABLED", False):
+            self.assertFalse(main._usar_busqueda_codigo({"tools": []}))
+
+    async def test_busqueda_codigo_del_cliente_no_se_intercepta(self):
+        herramienta = {"type": "function", "function": {"name": "buscar_codigo"}}
+        payload = {"tools": [herramienta], "messages": [{"role": "user", "content": "Busca"}]}
+        llamada = respuesta_herramienta(nombre="buscar_codigo", argumentos='{"consulta":"login"}')
+        with patch("app.main.CODE_SEARCH_ENABLED", True):
+            codigo = main._usar_busqueda_codigo(payload)
+        main._agregar_herramienta_busqueda(payload, {}, codigo)
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=llamada))
+        ) as cliente:
+            with patch("app.main._buscar_codigo_interno", new=AsyncMock()) as buscar:
+                respuesta = await main._completar_sin_stream(cliente, payload, busqueda_codigo=codigo)
+        buscar.assert_not_awaited()
+        self.assertEqual(json.loads(respuesta.body), llamada)
+
+    async def test_busqueda_codigo_sin_stream_continua_con_resultado(self):
+        peticiones = []
+
+        def responder(request):
+            peticiones.append(json.loads(request.content))
+            if len(peticiones) == 1:
+                return httpx.Response(200, json=respuesta_herramienta(
+                    nombre="buscar_codigo", argumentos='{"consulta":"autenticacion","limite":2}'
+                ))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Listo"}}]})
+
+        payload = {"messages": [{"role": "user", "content": "Busca codigo"}]}
+        main._agregar_herramienta_busqueda(payload, {}, codigo=True)
+        main._inyectar_herramientas(payload, {}, codigo=True)
+        self.assertIn("buscar_codigo", payload["messages"][0]["content"])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            with patch("app.main._buscar_codigo_interno", new=AsyncMock(return_value="fragmento")) as buscar:
+                respuesta = await main._completar_sin_stream(cliente, payload, busqueda_codigo=True)
+        buscar.assert_awaited_once_with("autenticacion", 2)
+        self.assertEqual(peticiones[1]["messages"][-1]["content"], "fragmento")
+        self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Listo")
+
+    async def test_busqueda_codigo_stream_intercepta_llamada(self):
+        primer_stream = (
+            evento_sse({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "type": "function",
+                "function": {"name": "buscar_codigo", "arguments": '{"consulta":"login"}'},
+            }]}, "finish_reason": None}]})
+            + evento_sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+            + b"data: [DONE]\n\n"
+        )
+        segundo_stream = (
+            evento_sse({"choices": [{"index": 0, "delta": {"content": "Listo"}, "finish_reason": "stop"}]})
+            + b"data: [DONE]\n\n"
+        )
+        peticiones = []
+
+        def responder(request):
+            peticiones.append(json.loads(request.content))
+            return httpx.Response(200, stream=httpx.ByteStream(segundo_stream))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            with patch("app.main._buscar_codigo_interno", new=AsyncMock(return_value="fragmento")) as buscar:
+                salida = b"".join([parte async for parte in main._completar_con_stream(
+                    cliente, {"messages": [], "stream": True},
+                    httpx.Response(200, stream=httpx.ByteStream(primer_stream)), busqueda_codigo=True,
+                )])
+        buscar.assert_awaited_once_with("login", 3)
+        self.assertEqual(peticiones[0]["messages"][-1]["content"], "fragmento")
+        self.assertIn(b"Listo", salida)
+        self.assertNotIn(b"buscar_codigo", salida)
+        self.assertEqual(salida.count(b"data: [DONE]"), 1)
+
+    async def test_busqueda_codigo_stream_del_cliente_no_se_intercepta(self):
+        herramienta = {"type": "function", "function": {"name": "buscar_codigo"}}
+        payload = {"tools": [herramienta], "messages": [{"role": "user", "content": "Busca"}]}
+        stream = (
+            evento_sse({"choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "type": "function",
+                "function": {"name": "buscar_codigo", "arguments": '{"consulta":"login"}'},
+            }]}, "finish_reason": None}]})
+            + evento_sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+            + b"data: [DONE]\n\n"
+        )
+        with patch("app.main.CODE_SEARCH_ENABLED", True):
+            codigo = main._usar_busqueda_codigo(payload)
+        async with httpx.AsyncClient() as cliente:
+            with patch("app.main._buscar_codigo_interno", new=AsyncMock()) as buscar:
+                salida = b"".join([parte async for parte in main._completar_con_stream(
+                    cliente, payload, httpx.Response(200, stream=httpx.ByteStream(stream)),
+                    busqueda_codigo=codigo,
+                )])
+        buscar.assert_not_awaited()
+        self.assertIn(b"buscar_codigo", salida)
+        self.assertEqual(salida.count(b"data: [DONE]"), 1)
+
+    async def test_busqueda_codigo_rechaza_argumentos_invalidos(self):
+        for argumentos in ('{}', '{"consulta":""}', '{"consulta":"x","limite":true}',
+                           '{"consulta":"x","limite":6}', '{"consulta":"x","extra":1}', '{'):
+            llamada = respuesta_herramienta(
+                nombre="buscar_codigo", argumentos=argumentos
+            )["choices"][0]["message"]["tool_calls"]
+            async with httpx.AsyncClient() as cliente:
+                with self.subTest(argumentos=argumentos), patch(
+                    "app.main._buscar_codigo_interno", new=AsyncMock()
+                ) as buscar, self.assertRaises(HTTPException) as error:
+                    await main._ejecutar_herramientas(cliente, llamada, {}, codigo=True)
+            self.assertEqual(error.exception.status_code, 502)
+            buscar.assert_not_awaited()
+
+    def test_busqueda_codigo_admite_longitud_maxima_con_unicode_escapado(self):
+        for longitud, valido in ((1000, True), (1001, False)):
+            argumentos = json.dumps({"consulta": "\U0001f600" * longitud, "limite": 5})
+            llamada = respuesta_herramienta(
+                nombre="buscar_codigo", argumentos=argumentos
+            )["choices"][0]["message"]["tool_calls"][0]
+            with self.subTest(longitud=longitud):
+                if valido:
+                    self.assertEqual(len(main._validar_llamada_codigo(llamada)[1]["consulta"]), 1000)
+                else:
+                    with self.assertRaises(HTTPException):
+                        main._validar_llamada_codigo(llamada)
+
+    async def test_busqueda_codigo_indice_faltante_no_inicia_motor(self):
+        indice = Mock()
+        indice.ruta.is_file.return_value = False
+        with patch("app.main.CODE_SEARCH_WORKSPACE", "proyecto"), patch(
+            "app.main.IndiceCodigo", return_value=indice
+        ), patch("app.main._asegurar_motor_embeddings", new=AsyncMock()) as motor:
+            with self.assertRaises(HTTPException) as error:
+                await main._buscar_codigo_interno("login", 3)
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertIn("indexar_proyecto", error.exception.detail)
+        motor.assert_not_awaited()
+
     async def test_registra_busqueda_sin_consulta_ni_resultados(self):
         llamada = respuesta_herramienta(argumentos='{"query":"consulta privada"}')["choices"][0]["message"]["tool_calls"]
         async with httpx.AsyncClient() as cliente:

@@ -18,6 +18,12 @@ class ContextoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ocupacion=no disponible", logs.output[0])
         self.assertIn("motivo=no disponible", logs.output[0])
         self.assertIn("prompt_tokens_s=no disponible generacion_tokens_s=no disponible", logs.output[0])
+        self.assertIn("cache_tokens=no disponible prompt_nuevos=no disponible", logs.output[0])
+
+    def test_tokens_de_cache_invalidos_no_se_registran(self):
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            main._registrar_consumo({"timings": {"cache_n": True, "prompt_n": -1}}, None, "stop")
+        self.assertIn("cache_tokens=no disponible prompt_nuevos=no disponible", logs.output[0])
 
     def test_velocidades_invalidas_no_se_registran_como_numeros(self):
         for valor in (True, -1, float("nan"), float("inf"), "100"):
@@ -98,7 +104,8 @@ class ContextoTests(unittest.IsolatedAsyncioTestCase):
         respuesta = {"choices": [{"finish_reason": "length",
             "message": {"content": "contenido privado"}}],
             "usage": {"prompt_tokens": 700, "completion_tokens": 100, "total_tokens": 800},
-            "timings": {"prompt_per_second": 543.66, "predicted_per_second": 61.78}}
+            "timings": {"cache_n": 0, "prompt_n": 700,
+                        "prompt_per_second": 543.66, "predicted_per_second": 61.78}}
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda _: httpx.Response(200, json=respuesta))
         ) as cliente:
@@ -108,6 +115,7 @@ class ContextoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("entrada=700 salida=100 total=800", logs.output[0])
         self.assertIn("contexto_por_slot=1000 ocupacion=80.0% motivo=length", logs.output[0])
         self.assertIn("prompt_tokens_s=543.66 generacion_tokens_s=61.78", logs.output[0])
+        self.assertIn("cache_tokens=0 prompt_nuevos=700", logs.output[0])
         self.assertNotIn("contenido privado", logs.output[0])
 
     async def test_log_stream_usa_cache_y_uso_posterior_al_finish(self):
@@ -129,5 +137,6 @@ class ContextoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("entrada=700 salida=100 total=800", logs.output[0])
         self.assertIn("ocupacion=80.0% motivo=length", logs.output[0])
         self.assertIn("prompt_tokens_s=123.46 generacion_tokens_s=62.30", logs.output[0])
+        self.assertIn("cache_tokens=200 prompt_nuevos=500", logs.output[0])
         self.assertNotIn("privado", logs.output[0])
         self.assertEqual(salida.count(b"data: [DONE]"), 1)

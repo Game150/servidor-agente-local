@@ -26,6 +26,7 @@ class IndiceCodigo:
     def __init__(
         self, proyecto: Path, directorio_indice: Path, url: str, modelo: str, clave: str,
         prefijo_documento: str = "", prefijo_consulta: str = "",
+        modelo_peticion: str | None = None,
     ) -> None:
         self.proyecto = proyecto.resolve(strict=True)
         if not self.proyecto.is_dir():
@@ -33,6 +34,7 @@ class IndiceCodigo:
         if not modelo:
             raise ValueError("Configura EMBEDDINGS_MODEL en el .env del servidor.")
         self.modelo = modelo
+        self.modelo_peticion = modelo_peticion if modelo_peticion is not None else modelo
         self.url = url.rstrip("/") + "/v1/embeddings"
         self.clave = clave
         self.prefijo_documento = prefijo_documento
@@ -80,7 +82,7 @@ class IndiceCodigo:
         try:
             respuesta = cliente.post(
                 self.url,
-                json={"model": self.modelo, "input": texto, "encoding_format": "float"},
+                json={"model": self.modelo_peticion, "input": texto, "encoding_format": "float"},
                 headers=headers,
             )
             respuesta.raise_for_status()
