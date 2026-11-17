@@ -1,0 +1,2 @@
+# Instalar además de requirements.txt para usar el MCP de búsqueda.
+mcp>=1.26,<2

@@ -79,6 +79,19 @@ LOG_MAX_BYTES = _entero("LOG_MAX_BYTES", 5 * 1024 * 1024)
 LLAMA_HOST = os.getenv("LLAMA_HOST", "127.0.0.1").strip() or "127.0.0.1"
 LLAMA_PORT = _entero("LLAMA_PORT", 8080)
 LLAMA_URL = f"http://{LLAMA_HOST}:{LLAMA_PORT}"
+EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "").strip()
+EMBEDDINGS_HOST = (
+    os.getenv("EMBEDDINGS_HOST", LLAMA_HOST).strip() or LLAMA_HOST
+)
+EMBEDDINGS_PORT = _entero("EMBEDDINGS_PORT", 8081)
+EMBEDDINGS_CTX_SIZE = _entero("EMBEDDINGS_CTX_SIZE", 2048)
+EMBEDDINGS_GPU_LAYERS = _entero("EMBEDDINGS_GPU_LAYERS", 0)
+if not 1 <= EMBEDDINGS_PORT <= 65535:
+    raise ValueError("EMBEDDINGS_PORT debe estar entre 1 y 65535.")
+if EMBEDDINGS_CTX_SIZE <= 0:
+    raise ValueError("EMBEDDINGS_CTX_SIZE debe ser mayor que 0.")
+if EMBEDDINGS_GPU_LAYERS < 0:
+    raise ValueError("EMBEDDINGS_GPU_LAYERS debe ser mayor o igual a 0.")
 INFERENCE_TIMEOUT_MINUTES = _entero("INFERENCE_TIMEOUT_MINUTES", 0)
 if INFERENCE_TIMEOUT_MINUTES < 0:
     raise ValueError("INFERENCE_TIMEOUT_MINUTES debe ser un entero mayor o igual a 0.")

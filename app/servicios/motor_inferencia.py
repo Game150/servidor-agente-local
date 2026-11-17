@@ -36,7 +36,14 @@ def huella_de(agente: dict) -> str:
     return json.dumps([agente["modelo"], agente["motor"]], sort_keys=True)
 
 
-def construir_argumentos(binario: Path, ruta_modelo: Path, motor: dict) -> list[str]:
+def construir_argumentos(
+    binario: Path,
+    ruta_modelo: Path,
+    motor: dict,
+    host: str = LLAMA_HOST,
+    port: int = LLAMA_PORT,
+    embedding: bool = False,
+) -> list[str]:
     argumentos = [
         str(binario),
         "-m", str(ruta_modelo),
@@ -47,9 +54,12 @@ def construir_argumentos(binario: Path, ruta_modelo: Path, motor: dict) -> list[
         "-np", str(motor["parallel"]),
         "-ctk", motor["cache_type_k"],
         "-ctv", motor["cache_type_v"],
-        "--host", LLAMA_HOST,
-        "--port", str(LLAMA_PORT),
+        "--host", host,
+        "--port", str(port),
     ]
+
+    if embedding:
+        argumentos.append("--embedding")
 
     if motor.get("batch_size") is not None:
         argumentos += ["--batch-size", str(motor["batch_size"])]
@@ -75,17 +85,17 @@ def _opciones_proceso() -> dict:
     return {"start_new_session": True}
 
 
-def _puerto_ocupado() -> bool:
+def _puerto_ocupado(host: str = LLAMA_HOST, port: int = LLAMA_PORT) -> bool:
     try:
-        with socket.create_connection((LLAMA_HOST, LLAMA_PORT), timeout=0.5):
+        with socket.create_connection((host, port), timeout=0.5):
             return True
     except OSError:
         return False
 
 
-def _health_ok() -> bool:
+def _health_ok(url: str = LLAMA_URL) -> bool:
     try:
-        with _OPENER.open(f"{LLAMA_URL}/health", timeout=2) as respuesta:
+        with _OPENER.open(f"{url}/health", timeout=2) as respuesta:
             return respuesta.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         # Incluye el 503 que llama-server devuelve mientras carga el modelo.
@@ -101,9 +111,20 @@ class MotorInferencia:
         consultar el estado nunca se bloquea mientras carga un modelo.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        host: str = LLAMA_HOST,
+        port: int = LLAMA_PORT,
+        embedding: bool = False,
+        log_name: str = "llama-server.log",
+    ) -> None:
         self._op = threading.Lock()
         self._mu = threading.Lock()
+        self._host = host
+        self._port = port
+        self.url = f"http://{host}:{port}"
+        self._embedding = embedding
+        self._log_name = log_name
         self._proceso: subprocess.Popen | None = None
         self._modelo: str | None = None
         self._huella: str | None = None
@@ -132,7 +153,7 @@ class MotorInferencia:
                 "ejecutandose": self._proceso is not None,
                 "estado": nombre,
                 "modelo_activo": self._modelo,
-                "puerto": LLAMA_PORT,
+                "puerto": self._port,
             }
 
     def es_compatible(self, agente: dict) -> bool:
@@ -204,18 +225,23 @@ class MotorInferencia:
                 "directorio de modelos."
             )
 
-        if _puerto_ocupado():
+        if _puerto_ocupado(self._host, self._port):
             raise RuntimeError(
-                f"El puerto {LLAMA_PORT} ya está en uso. ¿Quedó un "
-                "llama-server anterior abierto? Cerralo o cambiá LLAMA_PORT."
+                f"El puerto {self._port} ya está en uso. ¿Quedó un "
+                "llama-server anterior abierto? Revisá la configuración del puerto."
             )
 
         argumentos = construir_argumentos(
-            binario, Path(modelo["ruta"]), agente["motor"]
+            binario,
+            Path(modelo["ruta"]),
+            agente["motor"],
+            host=self._host,
+            port=self._port,
+            embedding=self._embedding,
         )
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ruta_log = LOG_DIR / "llama-server.log"
+        ruta_log = LOG_DIR / self._log_name
 
         if ruta_log.exists() and ruta_log.stat().st_size > LOG_MAX_BYTES:
             ruta_log.replace(ruta_log.with_name(ruta_log.name + ".1"))
@@ -263,7 +289,7 @@ class MotorInferencia:
                     f"Últimas líneas del log:\n{self._cola_log()}"
                 )
 
-            if _health_ok():
+            if _health_ok(self.url):
                 with self._mu:
                     self._listo = True
                 return
@@ -276,9 +302,8 @@ class MotorInferencia:
             f"Últimas líneas del log:\n{self._cola_log()}"
         )
 
-    @staticmethod
-    def _cola_log(lineas: int = 15) -> str:
-        ruta = LOG_DIR / "llama-server.log"
+    def _cola_log(self, lineas: int = 15) -> str:
+        ruta = LOG_DIR / self._log_name
 
         try:
             with ruta.open("rb") as f:
