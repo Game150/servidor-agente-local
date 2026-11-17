@@ -60,7 +60,7 @@ motor:
   # Máximo lógico de tokens por lote durante el procesamiento del prompt.
   batch_size: 2048
   # Máximo físico de tokens procesados a la vez; afecta velocidad y memoria.
-  ubatch_size: 256
+  ubatch_size: 512
   # Máximo de capas que llama.cpp intenta descargar a la GPU; 99 intenta todas.
   gpu_layers: 99
   # Hilos de CPU para generación; también se usan para el prompt si no se indica otro valor.

@@ -1,12 +1,12 @@
 # Identificador usado en el campo model de las solicitudes a la API.
 id: desarrollador-pro
 # Nombre descriptivo del agente.
-nombre: Agente Desarrollador Qwen 3.5 9B
+nombre: Agente Desarrollador Ling 3.0 Tiny
 # Descripción que aparece al consultar los agentes.
 descripcion: Asistente de desarrollo especializado en código agéntico con contexto largo.
 
 # Nombre del archivo GGUF sin la extensión .gguf.
-modelo: qwen3.5-9b-Q4_K_M
+modelo: Ling-3.0-tiny-Q4_K_M
 
 # Instrucciones de sistema que recibe el modelo.
 system_prompt: |
@@ -27,8 +27,13 @@ system_prompt: |
   5 y 8 archivos clave y haz búsquedas concretas; no leas recursivamente todo el repositorio.
   No repitas una búsqueda o llamada de herramienta que ya falló sin cambiar de método. Si el
   usuario pide solo análisis o explicación, mantén la tarea en modo lectura y no edites archivos.
-  Adapta los comandos al shell disponible; en Windows PowerShell no uses opciones de CMD como
-  "dir /b /s": usa cmdlets de PowerShell o búsqueda dirigida.
+  Prefiere las herramientas de lectura, listado y búsqueda disponibles antes que ejecutar comandos.
+  Si el terminal es Windows PowerShell, usa cmdlets directamente, sin iniciar otro shell:
+  Get-ChildItem -LiteralPath 'RUTA' -File | Select-Object -First 50
+  No uses head, find -type, ls -R ni opciones de CMD como dir /s; no invoques pwsh
+  salvo que hayas confirmado que existe. Busca solo en rutas relevantes.
+  Si falla un comando, lee el error y corrige su causa; si el nuevo intento también falla,
+  usa una herramienta alternativa o detente e informa la limitación.
   Para cambios de código, explica brevemente el enfoque, implementa el cambio mínimo completo
   y ejecuta verificaciones específicas. Revisa el resultado por errores y reporta archivos,
   pruebas y problemas pendientes. No digas que algo funciona si no lo verificaste.
@@ -43,10 +48,9 @@ system_prompt: |
 
 parametros:
   # Controla la aleatoriedad: valores menores suelen dar respuestas más predecibles.
-  # Qwen recomienda 0.6 para mejor calidad en agentes.
-  temperature: 0.6
+  # Valor provisional; ajustar según las recomendaciones de Ling 3.0 si se confirman.
+  temperature: 1.0
   # Limita la selección a los tokens que acumulan esta probabilidad.
-  # Qwen recomienda 0.95.
   top_p: 0.95
   # Máximo de tokens que puede generar la respuesta, incluido el razonamiento.
   max_tokens: 8192
@@ -54,23 +58,24 @@ parametros:
   forzar: false
 
   # Opcionales: descomenta para enviarlos a llama.cpp.
-  top_k: 20           # Qwen recomienda 20; filtra a los K tokens más probables.
+  top_k: 20           # Filtra a los K tokens más probables.
   min_p: 0.05         # Descarta tokens con probabilidad baja respecto al más probable; 0 lo desactiva.
-  # repeat_penalty: 1.0 # Penaliza repeticiones; 1.0 no aplica penalización.
+  repeat_penalty: 1.05 # 1.0 no aplica penalización.
 
 motor:
-  # Contexto total en tokens. 32768 deja margen en 8 GB de VRAM con un modelo de 9B (~5.5 GB).
-  ctx_size: 32768
+  # Contexto total en tokens. Ling 3.0 tiny admite 131072; se usa 32768 para no saturar la memoria.
+  ctx_size: 65536
   # Máximo lógico de tokens por lote durante el procesamiento del prompt.
   batch_size: 2048
   # Máximo físico de tokens procesados a la vez; afecta velocidad y memoria.
-  ubatch_size: 256
+  ubatch_size: 512
   # Máximo de capas que llama.cpp intenta descargar a la GPU; 99 intenta todas.
   gpu_layers: 99
   # Hilos de CPU para generación; también se usan para el prompt si no se indica otro valor.
   threads: 6
-  # Argumentos adicionales de llama-server; aquí se usan 6 hilos para procesar el prompt.
-  extra_args: ["--threads-batch", "6"]
+  # Mantiene en RAM los pesos de expertos de tres bloques MoE para liberar algo de VRAM.
+  # Es un ajuste experimental: comparar velocidad y uso de memoria antes de ampliarlo.
+  extra_args: ["--threads-batch", "6", "--override-tensor", 'blk\.[1-3]\.ffn_(gate|up|down)_exps\.weight=CPU']
   # Cantidad de slots simultáneos; el contexto total se reparte entre ellos.
   parallel: 1
   # Formatos K admitidos por llama-server b12292:

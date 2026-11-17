@@ -58,7 +58,7 @@ motor:
   # Cantidad de slots simultáneos; el contexto total se reparte entre ellos.
   parallel: 1
   # Formato de la caché de claves; q8_0 reduce memoria frente a formatos de mayor precisión.
-  cache_type_k: q5_1
+  cache_type_k: q8_0
   # Formato de la caché de valores; puede afectar memoria, rendimiento y precisión.
   cache_type_v: q5_1
   # Flash Attention: "on", "off" o "auto", según compatibilidad del modelo y backend.
