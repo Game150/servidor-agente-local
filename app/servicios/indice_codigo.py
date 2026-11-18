@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import subprocess
 import threading
@@ -20,6 +21,9 @@ EXTENSIONES = {
 MAX_ARCHIVO = 256 * 1024
 MAX_FRAGMENTO = 1000
 MAX_RESULTADOS = 5
+MAX_MARGEN_LINEAS = 20
+MAX_CARACTERES_LECTURA = 8000
+RRF_K = 60
 
 
 class IndiceCodigo:
@@ -46,15 +50,69 @@ class IndiceCodigo:
     def _conexion(self) -> sqlite3.Connection:
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         conexion = sqlite3.connect(self.ruta)
-        conexion.executescript("""
-            CREATE TABLE IF NOT EXISTS metadata (clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS archivos (ruta TEXT PRIMARY KEY, hash TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS fragmentos (
-                ruta TEXT NOT NULL, inicio INTEGER NOT NULL, fin INTEGER NOT NULL,
-                texto TEXT NOT NULL, vector TEXT NOT NULL
-            );
-        """)
+        try:
+            conexion.executescript("""
+                CREATE TABLE IF NOT EXISTS metadata (clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS archivos (ruta TEXT PRIMARY KEY, hash TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS fragmentos (
+                    ruta TEXT NOT NULL, inicio INTEGER NOT NULL, fin INTEGER NOT NULL,
+                    texto TEXT NOT NULL, vector TEXT NOT NULL
+                );
+            """)
+            self._asegurar_fts5(conexion)
+        except Exception:
+            conexion.close()
+            raise
         return conexion
+
+    @staticmethod
+    def _asegurar_fts5(conexion: sqlite3.Connection) -> None:
+        existe = conexion.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fragmentos_fts'"
+        ).fetchone()
+        if existe:
+            return
+
+        try:
+            conexion.execute("BEGIN IMMEDIATE")
+            existe = conexion.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fragmentos_fts'"
+            ).fetchone()
+            if existe:
+                conexion.commit()
+                return
+
+            conexion.execute(
+                "CREATE VIRTUAL TABLE fragmentos_fts USING "
+                "fts5(texto, ruta, content='fragmentos', content_rowid='rowid')"
+            )
+            conexion.execute("""
+                CREATE TRIGGER fragmentos_fts_insert AFTER INSERT ON fragmentos BEGIN
+                    INSERT INTO fragmentos_fts(rowid, texto, ruta)
+                    VALUES (new.rowid, new.texto, new.ruta);
+                END
+            """)
+            conexion.execute("""
+                CREATE TRIGGER fragmentos_fts_delete AFTER DELETE ON fragmentos BEGIN
+                    INSERT INTO fragmentos_fts(fragmentos_fts, rowid, texto, ruta)
+                    VALUES ('delete', old.rowid, old.texto, old.ruta);
+                END
+            """)
+            conexion.execute("""
+                CREATE TRIGGER fragmentos_fts_update AFTER UPDATE ON fragmentos BEGIN
+                    INSERT INTO fragmentos_fts(fragmentos_fts, rowid, texto, ruta)
+                    VALUES ('delete', old.rowid, old.texto, old.ruta);
+                    INSERT INTO fragmentos_fts(rowid, texto, ruta)
+                    VALUES (new.rowid, new.texto, new.ruta);
+                END
+            """)
+            conexion.execute("INSERT INTO fragmentos_fts(fragmentos_fts) VALUES ('rebuild')")
+            conexion.commit()
+        except sqlite3.Error as error:
+            conexion.rollback()
+            if isinstance(error, sqlite3.OperationalError) and "fts5" in str(error).lower():
+                raise RuntimeError("SQLite debe tener soporte FTS5 para buscar texto.") from error
+            raise
 
     def _archivos_git(self) -> list[str]:
         try:
@@ -228,17 +286,112 @@ class IndiceCodigo:
                 raise RuntimeError("Cambió la configuración del modelo. Ejecuta indexar_proyecto.")
             with httpx.Client(timeout=httpx.Timeout(None, connect=5), trust_env=False) as cliente:
                 vector = self._embedding(cliente, self.prefijo_consulta + consulta)
-            resultados = []
-            for ruta, inicio, fin, texto, vector_json in conexion.execute(
-                "SELECT ruta, inicio, fin, texto, vector FROM fragmentos"
+            conexion.execute("BEGIN")
+            resultados = {}
+            semanticos = []
+            for rowid, ruta, inicio, fin, texto, vector_json in conexion.execute(
+                "SELECT rowid, ruta, inicio, fin, texto, vector FROM fragmentos ORDER BY rowid"
             ):
                 guardado = json.loads(vector_json)
                 if len(vector) != len(guardado):
                     raise RuntimeError("La dimensión del modelo cambió. Indexa con reconstruir=true.")
                 puntaje = sum(a * b for a, b in zip(vector, guardado))
-                resultados.append({
+                resultados[rowid] = {
                     "ruta": ruta, "linea_inicio": inicio, "linea_fin": fin,
                     "similitud": round(puntaje, 4), "texto": texto,
-                })
-        resultados.sort(key=lambda resultado: resultado["similitud"], reverse=True)
-        return resultados[:limite]
+                }
+                semanticos.append((rowid, puntaje))
+            semanticos.sort(key=lambda resultado: (-resultado[1], resultado[0]))
+
+            consulta_fts = self._consulta_fts(consulta)
+            textuales = []
+            if consulta_fts:
+                textuales = [
+                    fila[0] for fila in conexion.execute(
+                        """
+                        SELECT rowid
+                        FROM fragmentos_fts
+                        WHERE fragmentos_fts MATCH ?
+                        ORDER BY bm25(fragmentos_fts), rowid
+                        LIMIT ?
+                        """,
+                        (consulta_fts, MAX_RESULTADOS),
+                    )
+                ]
+            conexion.commit()
+
+        puestos = {}
+        for rango, (rowid, _) in enumerate(semanticos[:MAX_RESULTADOS], 1):
+            puestos[rowid] = puestos.get(rowid, 0.0) + 1 / (RRF_K + rango)
+        for rango, rowid in enumerate(textuales, 1):
+            puestos[rowid] = puestos.get(rowid, 0.0) + 1 / (RRF_K + rango)
+
+        ordenados = sorted(
+            puestos,
+            key=lambda rowid: (
+                -puestos[rowid],
+                -resultados[rowid]["similitud"],
+                resultados[rowid]["ruta"],
+                resultados[rowid]["linea_inicio"],
+            ),
+        )
+        return [resultados[rowid] for rowid in ordenados[:limite]]
+
+    @staticmethod
+    def _consulta_fts(consulta: str) -> str:
+        tokens = re.findall(r"[^\W_]+", consulta, flags=re.UNICODE)
+        if not tokens:
+            return ""
+        frase = '"' + " ".join(tokens) + '"'
+        terminos = dict.fromkeys(tokens)
+        return " OR ".join([frase, *(f'"{termino}"' for termino in terminos)])
+
+    def leer_lineas(self, ruta: str, linea: int, margen: int = 5) -> dict:
+        """Lee líneas de un archivo indexado, sin permitir salir del workspace."""
+        if not isinstance(ruta, str) or not ruta:
+            raise ValueError("La ruta debe ser un texto relativo.")
+        if type(linea) is not int or linea < 1:
+            raise ValueError("La línea debe ser un entero mayor o igual a 1.")
+        if type(margen) is not int or not 0 <= margen <= MAX_MARGEN_LINEAS:
+            raise ValueError(f"El margen debe estar entre 0 y {MAX_MARGEN_LINEAS}.")
+
+        relativa = Path(ruta)
+        if relativa.is_absolute() or relativa.drive or not relativa.parts or ".." in relativa.parts:
+            raise ValueError("La ruta debe permanecer dentro del proyecto.")
+        archivo = self.proyecto / relativa
+        resuelta = archivo.resolve(strict=True)
+        if not resuelta.is_relative_to(self.proyecto):
+            raise ValueError("La ruta debe permanecer dentro del proyecto.")
+        if not resuelta.is_file():
+            raise ValueError("La ruta no corresponde a un archivo.")
+
+        with closing(self._conexion()) as conexion:
+            indexado = conexion.execute(
+                "SELECT 1 FROM archivos WHERE ruta = ?",
+                (relativa.as_posix(),),
+            ).fetchone()
+        if not indexado:
+            raise ValueError("El archivo no pertenece al índice del proyecto.")
+        if resuelta.stat().st_size > MAX_ARCHIVO:
+            raise ValueError(f"El archivo supera el límite de {MAX_ARCHIVO} bytes.")
+
+        lineas = resuelta.read_text(encoding="utf-8").splitlines()
+        if linea > len(lineas):
+            raise ValueError("La línea solicitada no existe en el archivo.")
+        inicio = max(1, linea - margen)
+        fin = min(len(lineas), linea + margen)
+        contenido = "\n".join(lineas[inicio - 1:fin])
+        truncado = len(contenido) > MAX_CARACTERES_LECTURA
+        if truncado:
+            contenido = contenido[:MAX_CARACTERES_LECTURA]
+            lineas_devueltas = contenido.split("\n")
+            if contenido.endswith("\n"):
+                lineas_devueltas.pop()
+            fin = inicio + len(lineas_devueltas) - 1
+        return {
+            "ruta": relativa.as_posix(),
+            "linea_inicio": inicio,
+            "linea_fin": fin,
+            "contenido": contenido,
+            "truncado": truncado,
+        }

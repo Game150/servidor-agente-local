@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.nucleo.config import (
+    BASE_DIR,
     LLAMA_HOST,
     LLAMA_PORT,
     LLAMA_URL,
@@ -73,7 +74,14 @@ def construir_argumentos(
     if motor.get("threads"):
         argumentos += ["-t", str(motor["threads"])]
 
-    argumentos += list(motor.get("extra_args", []))
+    extra_args = list(motor.get("extra_args", []))
+    for indice, argumento in enumerate(extra_args[:-1]):
+        if argumento == "--mmproj":
+            ruta_mmproj = Path(extra_args[indice + 1])
+            if not ruta_mmproj.is_absolute():
+                extra_args[indice + 1] = str(BASE_DIR / ruta_mmproj)
+            break
+    argumentos += extra_args
 
     return argumentos
 

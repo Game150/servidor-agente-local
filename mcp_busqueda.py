@@ -27,11 +27,7 @@ try:
     logger.addHandler(_manejador)
 except OSError:
     logger.addHandler(logging.NullHandler())
-logger.info(
-    "MCP iniciado: workspace=%s api=%s modelo_embeddings=%s",
-    os.getenv("MCP_WORKSPACE", "(sin definir)"), os.getenv("MCP_API_URL", "http://127.0.0.1:8000"),
-    EMBEDDINGS_MODEL or "(sin definir)",
-)
+logger.info("MCP iniciado")
 
 
 @lru_cache(maxsize=1)
@@ -63,7 +59,11 @@ def indexar_proyecto(reconstruir: bool = False) -> dict:
     try:
         resultado = _indice().indexar(reconstruir)
     except Exception as error:
-        logger.error("indexar_proyecto: fallo (%s) %s (%.1f s)", type(error).__name__, error, time.monotonic() - inicio)
+        logger.error(
+            "indexar_proyecto: fallo (%s) (%.1f s)",
+            type(error).__name__,
+            time.monotonic() - inicio,
+        )
         raise
     logger.info("indexar_proyecto: listo %s (%.1f s)", resultado, time.monotonic() - inicio)
     return resultado
@@ -71,23 +71,40 @@ def indexar_proyecto(reconstruir: bool = False) -> dict:
 
 @mcp.tool()
 def buscar_codigo(consulta: str, limite: int = 3) -> list[dict]:
-    """Busca por significado y devuelve hasta cinco fragmentos del proyecto indexado."""
+    """Busca por significado y texto, y devuelve hasta cinco fragmentos indexados."""
     inicio = time.monotonic()
-    texto = " ".join(str(consulta).split())
-    logger.info("buscar_codigo: consulta=%r limite=%s", texto[:80], limite)
     try:
         resultados = _indice().buscar(consulta, limite)
     except Exception as error:
-        logger.error("buscar_codigo: fallo (%s) %s (%.1f s)", type(error).__name__, error, time.monotonic() - inicio)
+        logger.error(
+            "buscar_codigo: fallo (%s) (%.1f s)",
+            type(error).__name__,
+            time.monotonic() - inicio,
+        )
         raise
     logger.info(
-        "buscar_codigo: %d resultados, similitud_max=%s, rutas=%s (%.1f s)",
+        "buscar_codigo: %d resultados (%.1f s)",
         len(resultados),
-        resultados[0]["similitud"] if resultados else "n/a",
-        ", ".join(f"{r['ruta']}:{r['linea_inicio']}" for r in resultados),
         time.monotonic() - inicio,
     )
     return resultados
+
+
+@mcp.tool()
+def leer_lineas(ruta: str, linea: int, margen: int = 5) -> dict:
+    """Lee un rango acotado alrededor de una línea de un archivo indexado."""
+    inicio = time.monotonic()
+    try:
+        resultado = _indice().leer_lineas(ruta, linea, margen)
+    except Exception as error:
+        logger.error(
+            "leer_lineas: fallo (%s) (%.1f s)",
+            type(error).__name__,
+            time.monotonic() - inicio,
+        )
+        raise
+    logger.info("leer_lineas: listo (%.1f s)", time.monotonic() - inicio)
+    return resultado
 
 
 if __name__ == "__main__":

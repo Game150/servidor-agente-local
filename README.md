@@ -54,7 +54,7 @@ Crea la carpeta `models` y coloca dentro el archivo `.gguf` que quieras usar:
 New-Item -ItemType Directory -Force .\models
 ```
 
-El proyecto no incluye el modelo: debes conseguir y descargar por separado un GGUF compatible. El agente incluido está configurado para un archivo llamado `qwen3.5-4b-Q4_K_M.gguf`. Si el archivo descargado tiene otro nombre, cambia el campo `modelo` en `config/agentes/desarrollador.yaml` por el nombre del archivo sin `.gguf`.
+El proyecto no incluye el modelo: debes conseguir y descargar por separado un GGUF compatible. El agente incluido está configurado para un archivo llamado `qwen2.5-coder-7b-instruct-q4_k_m.gguf`. Si el archivo descargado tiene otro nombre, cambia el campo `modelo` en `config/agentes/desarrollador.yaml` por el nombre del archivo sin `.gguf`.
 
 ### 3. Prepara la configuración
 
@@ -247,11 +247,14 @@ El MCP toma `EMBEDDINGS_MODEL` y `API_KEY` del `.env` de este servidor. Por defe
 
 Pide a Cline que ejecute `indexar_proyecto` para crear o actualizar el índice, y luego `buscar_codigo` con una consulta en lenguaje natural. Por ejemplo: «Indexa el proyecto y busca dónde se valida el inicio de sesión».
 
-Al indexar, el MCP divide el texto en fragmentos de hasta 1000 caracteres y solicita un vector para cada uno. Al buscar, convierte la consulta en otro vector y compara su similitud con los guardados. Devuelve por defecto los tres fragmentos más similares, con ruta, líneas y puntuación; el parámetro `limite` acepta de uno a cinco resultados. La consulta admite hasta 1000 caracteres. El texto y las líneas corresponden a la última indexación, no necesariamente al estado actual del archivo.
+Al indexar, el MCP divide el texto en fragmentos de hasta 1000 caracteres y solicita un vector para cada uno. Al buscar, convierte la consulta en otro vector y compara su similitud con los guardados. También busca términos en el texto y las rutas de archivo mediante SQLite FTS5 y combina ambos rankings con Reciprocal Rank Fusion (RRF), sin sumar sus puntuaciones. Devuelve por defecto tres fragmentos, con ruta, líneas y texto; `limite` acepta de uno a cinco resultados. La propiedad `similitud` sigue siendo la puntuación vectorial; el orden final usa RRF. La consulta admite hasta 1000 caracteres y SQLite debe incluir FTS5. Al abrir por primera vez un índice previo, el índice textual se crea desde los fragmentos existentes, sin recalcular ni borrar sus vectores. El texto y las líneas corresponden a la última indexación, no necesariamente al estado actual del archivo.
+
+Para recuperar contexto alrededor de un resultado, usa la herramienta MCP `leer_lineas` con `ruta` (la ruta relativa devuelta por la búsqueda), `linea` (número inicial, desde 1) y `margen` (líneas a cada lado; predeterminado 5, máximo 20). Por ejemplo: `leer_lineas(ruta="app/main.py", linea=120, margen=5)`. Solo permite leer archivos del índice que sigan dentro del workspace; rechaza rutas fuera del proyecto y archivos no indexados. Devuelve la ruta, el rango, el contenido y si se truncó. Limita la salida a 41 líneas y 8.000 caracteres.
 
 La indexación posterior reutiliza los vectores de archivos sin cambios y elimina los archivos ya no presentes. No hay observador automático: vuelve a indexar cuando cambie el código. Si cambia el nombre del modelo o los prefijos, vuelve a indexar; si sustituyes el GGUF por otro con el mismo nombre, solicita `indexar_proyecto` con `reconstruir=true`. Si falla la generación de embeddings durante una actualización, se conserva el índice anterior.
 
 El MCP indexa archivos UTF-8 de extensiones habituales que Git lista dentro de `MCP_WORKSPACE`: respeta los archivos ignorados **no rastreados**, pero Git incluye archivos ya rastreados aunque coincidan con `.gitignore`. Excluye archivos `.env`, enlaces simbólicos, binarios y archivos de más de 256 KiB. No detecta todos los secretos: revisa qué contiene el proyecto antes de indexar. El índice guarda texto y vectores localmente, y los fragmentos se envían a la API configurada; no uses una API remota si no quieres enviarle el código. Cada MCP apunta a un solo proyecto; cambia `MCP_WORKSPACE` y reinicia el MCP para usar otro. El índice es una ayuda para localizar código, no garantiza que Cline lo consulte ni que encuentre siempre el fragmento correcto.
+El registro `LOG_DIR/mcp-busqueda.log` conserva metadatos de operación (tipo de operación, cantidad de resultados y duración), no consultas, fragmentos, rutas ni la ruta local del workspace.
 
 ### Búsqueda semántica interna de la API
 
@@ -462,7 +465,7 @@ id: desarrollador
 nombre: Agente Desarrollador
 descripcion: Asistente de desarrollo.
 
-modelo: qwen3.5-4b-Q4_K_M
+modelo: qwen2.5-coder-7b-instruct-q4_k_m
 
 system_prompt: |
   Responde en español, de forma clara y directa.
@@ -485,11 +488,16 @@ Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF 
 
 El agente `trabajo-gemma-4-e4b` necesita, además del modelo, el proyector visual
 `mmproj-F16.gguf` de [Unsloth Gemma 4 E4B](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF).
-Guárdalo como `proyectores\mmproj-F16.gguf` en la raíz del proyecto y
-ajusta en el YAML del agente la ruta absoluta que sigue a `--mmproj` en `motor.extra_args`.
+Guárdalo como `proyectores/mmproj-F16.gguf` en la raíz del proyecto. El YAML ya
+usa esa ruta relativa, que el servidor resuelve desde la raíz del proyecto para
+pasarla a `llama-server`.
 El directorio `proyectores` está excluido de Git. Si falta el archivo, el agente no arrancará;
 descárgalo o quita `--mmproj` y su ruta para usar solo texto. El proyector y las imágenes consumen memoria
 adicional y requieren una versión de llama.cpp compatible.
+
+La prueba de imágenes comprueba que la API reenvía el objeto `image_url` del
+mensaje sin alterarlo; no valida que una versión concreta de llama.cpp acepte
+el formato ni que el modelo genere una respuesta con el proyector.
 
 ## Endpoints disponibles
 
@@ -573,7 +581,7 @@ xychart-beta
 
 El pico de VRAM se muestreó con el contador `GPU Adapter Memory / Dedicated Usage` de Windows durante cada ejecución; incluye el escritorio y otros procesos, no solo el modelo, y puede no captar picos breves. En esta muestra, aumentar el microbatch de 256 a 512 mejoró ligeramente el procesamiento del prompt; cambiar el batch tuvo poco efecto. La generación fue similar en todas las combinaciones. **Los datos no muestran una relación exponencial** ni permiten atribuir cada diferencia de VRAM exclusivamente a estos ajustes.
 
-La prueba usa el contexto que asigna `llama-bench` para cada prueba, no el `ctx_size` de 65536 del agente: no predice su consumo real con ese contexto ni el rendimiento de Cline. Para repetir una combinación desde la raíz del proyecto, sustituye la ruta al GGUF:
+La prueba usa el contexto que asigna `llama-bench` para cada prueba, no el `ctx_size` de 131072 configurado para `desarrollador-pro`: no predice su consumo real con ese contexto ni el rendimiento de Cline. Para repetir una combinación desde la raíz del proyecto, sustituye la ruta al GGUF:
 
 ```powershell
 .\llama-b12292-bin-win-vulkan-x64\llama-bench.exe -m "C:\ruta\al\modelo.gguf" -p 4096 -n 128 -r 3 -b 2048 -ub 512 -ngl 99 -ctk q8_0 -ctv q8_0
