@@ -1,9 +1,10 @@
 import yaml
 
 from app.nucleo.config import AGENTS_DIR
+from app.servicios.prompts import PERFILES_PROMPT
 
-CAMPOS_TEXTO = ("id", "nombre", "descripcion", "modelo", "system_prompt")
-CAMPOS_PERMITIDOS = {*CAMPOS_TEXTO, "parametros", "motor"}
+CAMPOS_TEXTO = ("id", "nombre", "descripcion", "modelo")
+CAMPOS_PERMITIDOS = {*CAMPOS_TEXTO, "system_prompt", "perfil_prompt", "parametros", "motor"}
 
 # Parámetros de muestreo por defecto. Cualquier otro parámetro que acepte
 # llama-server (top_k, min_p, repeat_penalty...) también puede ponerse en el
@@ -29,6 +30,10 @@ MOTOR_DEFECTO = {
     "flash_attn": None,
     "threads": None,
     "extra_args": [],
+    "ngram_mod": False,
+    "ngram_mod_n_match": 24,
+    "ngram_mod_n_min": 48,
+    "ngram_mod_n_max": 64,
 }
 
 
@@ -129,6 +134,19 @@ def _validar_motor(bruto, archivo: str) -> dict:
     ):
         raise _fallo(archivo, "motor.threads debe ser un entero >= 1")
 
+    if not isinstance(motor["ngram_mod"], bool):
+        raise _fallo(archivo, "motor.ngram_mod debe ser true o false")
+
+    for campo in ("ngram_mod_n_match", "ngram_mod_n_min", "ngram_mod_n_max"):
+        if not _es_entero(motor[campo]) or motor[campo] < 1:
+            raise _fallo(archivo, f"motor.{campo} debe ser un entero >= 1")
+
+    if motor["ngram_mod_n_min"] > motor["ngram_mod_n_max"]:
+        raise _fallo(
+            archivo,
+            "motor.ngram_mod_n_min no puede ser mayor que motor.ngram_mod_n_max",
+        )
+
     extra = motor["extra_args"]
 
     if extra is None:
@@ -169,8 +187,25 @@ def _validar_agente(bruto, archivo: str) -> dict:
         if not isinstance(bruto[campo], str) or not bruto[campo].strip():
             raise _fallo(archivo, f"'{campo}' debe ser un texto no vacío")
 
+    system_prompt = bruto.get("system_prompt", "")
+    if not isinstance(system_prompt, str) or (
+        "system_prompt" in bruto and not system_prompt.strip()
+    ):
+        raise _fallo(archivo, "'system_prompt' debe ser texto no vacío")
+
+    perfil_prompt = bruto.get("perfil_prompt")
+    if perfil_prompt is not None and (
+        not isinstance(perfil_prompt, str) or perfil_prompt not in PERFILES_PROMPT
+    ):
+        raise _fallo(
+            archivo,
+            "'perfil_prompt' debe ser uno de: " + ", ".join(sorted(PERFILES_PROMPT)),
+        )
+
     return {
         **{campo: bruto[campo] for campo in CAMPOS_TEXTO},
+        "system_prompt": system_prompt,
+        "perfil_prompt": perfil_prompt,
         "parametros": _validar_parametros(bruto.get("parametros"), archivo),
         "motor": _validar_motor(bruto.get("motor"), archivo),
     }

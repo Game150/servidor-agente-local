@@ -75,6 +75,41 @@ def construir_argumentos(
         argumentos += ["-t", str(motor["threads"])]
 
     extra_args = list(motor.get("extra_args", []))
+
+    if motor.get("ngram_mod"):
+        def extra_args_define(opcion: str) -> bool:
+            return any(
+                argumento == opcion or argumento.startswith(f"{opcion}=")
+                for argumento in extra_args
+            )
+
+        if extra_args_define("--spec-type"):
+            indice_tipo = next(
+                indice
+                for indice, argumento in enumerate(extra_args)
+                if argumento == "--spec-type"
+                or argumento.startswith("--spec-type=")
+            )
+            tipo = extra_args[indice_tipo].partition("=")[2]
+            if not tipo and indice_tipo + 1 < len(extra_args):
+                tipo = extra_args[indice_tipo + 1]
+            if "ngram-mod" not in tipo.split(","):
+                raise ValueError(
+                    "motor.ngram_mod requiere que motor.extra_args no "
+                    "sobrescriba --spec-type sin incluir ngram-mod"
+                )
+        else:
+            argumentos += ["--spec-type", "ngram-mod"]
+
+        opciones_ngram = (
+            ("ngram_mod_n_match", "--spec-ngram-mod-n-match"),
+            ("ngram_mod_n_min", "--spec-ngram-mod-n-min"),
+            ("ngram_mod_n_max", "--spec-ngram-mod-n-max"),
+        )
+        for campo, opcion in opciones_ngram:
+            if motor.get(campo) is not None and not extra_args_define(opcion):
+                argumentos += [opcion, str(motor[campo])]
+
     for indice, argumento in enumerate(extra_args[:-1]):
         if argumento == "--mmproj":
             ruta_mmproj = Path(extra_args[indice + 1])
@@ -84,6 +119,49 @@ def construir_argumentos(
     argumentos += extra_args
 
     return argumentos
+
+
+def verificar_soporte_ngram_mod(binario: Path) -> None:
+    """Falla con un error explícito si el binario no expone las opciones."""
+    try:
+        resultado = subprocess.run(
+            [str(binario), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"No se pudo verificar la compatibilidad ngram-mod de {binario}: "
+            "llama-server no respondió a --help en 15 segundos."
+        ) from error
+
+    ayuda = resultado.stdout + resultado.stderr
+    faltantes = [
+        opcion
+        for opcion in (
+            "--spec-type",
+            "--spec-ngram-mod-n-match",
+            "--spec-ngram-mod-n-min",
+            "--spec-ngram-mod-n-max",
+        )
+        if opcion not in ayuda
+    ]
+    tipos = next(
+        (linea for linea in ayuda.splitlines() if "--spec-type" in linea),
+        "",
+    )
+    if "ngram-mod" not in tipos:
+        faltantes.append("--spec-type con ngram-mod")
+
+    if resultado.returncode != 0 or faltantes:
+        detalle = ", ".join(faltantes) if faltantes else "opciones no verificables"
+        raise RuntimeError(
+            "motor.ngram_mod está habilitado, pero el llama-server "
+            f"'{binario}' no confirma compatibilidad con ngram-mod "
+            f"(build y opciones requeridas: {detalle}). Actualiza llama.cpp."
+        )
 
 
 def _opciones_proceso() -> dict:
@@ -232,6 +310,9 @@ class MotorInferencia:
                 f"No se encuentra el modelo '{agente['modelo']}' en el "
                 "directorio de modelos."
             )
+
+        if agente["motor"].get("ngram_mod"):
+            verificar_soporte_ngram_mod(binario)
 
         if _puerto_ocupado(self._host, self._port):
             raise RuntimeError(

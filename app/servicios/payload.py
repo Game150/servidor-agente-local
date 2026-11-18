@@ -1,3 +1,6 @@
+from app.servicios.prompts import construir_prompt_sistema
+
+
 ROLES_SISTEMA = ("system", "developer")
 
 
@@ -21,8 +24,8 @@ def _texto(contenido) -> str:
 def construir_payload(agente: dict, solicitud: dict) -> dict:
     """Combina la solicitud del cliente con la configuración del agente.
 
-    - Un único mensaje `system`: el del agente seguido de los que mande el
-      cliente (muchas plantillas de chat fallan con más de uno).
+    - Un único mensaje `system`: reglas globales, perfil e instrucciones del
+      agente, seguidos de los mensajes de sistema que mande el cliente.
     - Parámetros de muestreo: los del agente son el valor por defecto; el
       cliente los sobrescribe salvo que el agente tenga `forzar: true`.
     - `max_completion_tokens` se traduce a `max_tokens`.
@@ -39,7 +42,7 @@ def construir_payload(agente: dict, solicitud: dict) -> dict:
         else:
             resto.append(mensaje)
 
-    sistema = "\n\n".join([agente["system_prompt"].strip(), *sistema_cliente])
+    sistema = "\n\n".join([construir_prompt_sistema(agente), *sistema_cliente])
 
     payload = {
         **solicitud,

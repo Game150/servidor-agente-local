@@ -467,8 +467,12 @@ descripcion: Asistente de desarrollo.
 
 modelo: qwen2.5-coder-7b-instruct-q4_k_m
 
+# Opcional: perfil compartido "desarrollo" o "trabajo".
+perfil_prompt: desarrollo
+
+# Opcional: instrucciones adicionales solo para este agente.
 system_prompt: |
-  Responde en español, de forma clara y directa.
+  Añade aquí únicamente instrucciones propias de este agente.
 
 parametros:
   temperature: 0.3
@@ -483,6 +487,53 @@ motor:
 ```
 
 Puedes cambiar el `id`, las instrucciones, los parámetros y el nombre del GGUF para crear otros agentes.
+Las reglas comunes y los perfiles `desarrollo` y `trabajo` se definen en
+`app/servicios/prompts.py`. `perfil_prompt` selecciona uno de esos perfiles y
+`system_prompt` agrega instrucciones exclusivas del agente.
+
+`system_prompt` es opcional: aunque no aparezca en el YAML, el agente recibe un mensaje `system`
+con las reglas globales y el perfil seleccionado. El servidor compone ese mensaje en este orden:
+reglas globales, perfil (si está configurado), `system_prompt` (si existe) y, al final, los mensajes
+`system` o `developer` enviados por el cliente. Si se omite `perfil_prompt`, se aplican las reglas
+globales y las instrucciones propias (si las hay).
+
+Las descripciones actuales de herramientas y skills se inyectan por separado, así que no hace
+falta copiarlas en el prompt.
+
+### Decodificación especulativa `ngram-mod`
+
+`ngram-mod` es una estrategia de decodificación especulativa que busca secuencias
+repetidas en el contexto; **no usa ni descarga un modelo draft**. Está desactivada
+por defecto y se configura por agente en `motor`:
+
+```yaml
+motor:
+  ngram_mod: true
+  ngram_mod_n_match: 24
+  ngram_mod_n_min: 48
+  ngram_mod_n_max: 64
+```
+
+Usa `ngram_mod: false` (o quita la opción) para desactivarla. Los parámetros
+`ngram_mod_n_match`, `ngram_mod_n_min` y `ngram_mod_n_max` deben ser enteros
+positivos; el mínimo no puede superar el máximo. Sus valores predeterminados
+coinciden con los del `llama-server` b12292 incluido en este proyecto. Si una
+opción equivalente ya está en `motor.extra_args`, se conserva esa opción en vez
+de añadir otra; `--spec-type` en `extra_args` debe incluir `ngram-mod`.
+
+El binario debe anunciar `--spec-type` con el tipo `ngram-mod` y las opciones
+`--spec-ngram-mod-n-match`, `--spec-ngram-mod-n-min` y
+`--spec-ngram-mod-n-max`. Al habilitarlo, el servidor comprueba estas capacidades
+al iniciar el motor y falla con un error explícito si faltan. Actualiza la
+compilación de llama.cpp configurada mediante `LLAMA_SERVER_PATH` si no las
+reconoce.
+
+Para comparar, usa el mismo modelo, prompt, longitud de salida y carga del equipo:
+ejecuta varias generaciones con `ngram_mod: false`, luego con `true`, y compara
+los tokens/s de generación registrados por llama.cpp en `logs/llama-server.log`.
+Al cambiar el YAML, el motor se reinicia al atender la siguiente solicitud. Las
+pruebas unitarias verifican configuración y argumentos; no miden ni garantizan
+una mejora de rendimiento, que depende del modelo y del texto generado.
 
 ### Imágenes con Gemma 4 E4B
 
