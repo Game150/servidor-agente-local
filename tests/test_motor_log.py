@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.nucleo.config import BASE_DIR
 from app.servicios.motor_inferencia import MotorInferencia, construir_argumentos, huella_de
 from app.servicios.registro_agentes import _validar_motor
 
@@ -72,6 +73,22 @@ class LogDeCargaTests(unittest.TestCase):
         self.assertNotEqual(
             huella_de({"modelo": "modelo", "motor": anterior}),
             huella_de({"modelo": "modelo", "motor": configurado}),
+        )
+
+    def test_ruta_relativa_mmproj_se_resuelve_desde_la_raiz_del_proyecto(self):
+        motor = _validar_motor(
+            {"extra_args": ["--mmproj", "proyectores/mmproj-F16.gguf"]},
+            "agente.yaml",
+        )
+        argumentos = construir_argumentos(
+            Path("llama-server"),
+            Path("modelo.gguf"),
+            motor,
+        )
+        indice = argumentos.index("--mmproj")
+        self.assertEqual(
+            argumentos[indice + 1],
+            str(BASE_DIR / "proyectores/mmproj-F16.gguf"),
         )
 
     def test_ubatch_size_invalido_se_rechaza(self):

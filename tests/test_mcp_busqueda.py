@@ -62,25 +62,72 @@ class McpBusquedaTests(unittest.IsolatedAsyncioTestCase):
                         herramientas = await sesion.list_tools()
                         self.assertEqual(
                             {herramienta.name for herramienta in herramientas.tools},
-                            {"indexar_proyecto", "buscar_codigo"},
+                            {"indexar_proyecto", "buscar_codigo", "leer_lineas"},
+                        )
+                        esquemas = {
+                            herramienta.name: herramienta.inputSchema
+                            for herramienta in herramientas.tools
+                        }
+                        self.assertEqual(
+                            set(esquemas["buscar_codigo"]["properties"]),
+                            {"consulta", "limite"},
+                        )
+                        self.assertEqual(
+                            set(esquemas["buscar_codigo"]["required"]),
+                            {"consulta"},
+                        )
+                        self.assertEqual(
+                            set(esquemas["leer_lineas"]["properties"]),
+                            {"ruta", "linea", "margen"},
+                        )
+                        self.assertEqual(
+                            set(esquemas["leer_lineas"]["required"]),
+                            {"ruta", "linea"},
                         )
                         antes = await asyncio.wait_for(
-                            sesion.call_tool("buscar_codigo", {"consulta": "login"}), timeout=30
+                            sesion.call_tool(
+                                "buscar_codigo",
+                                {"consulta": "consulta-privada-7f38"},
+                            ),
+                            timeout=30,
                         )
                         self.assertTrue(antes.isError)
+                        self.assertIn("indexar_proyecto", antes.content[0].text)
                         indexado = await asyncio.wait_for(
                             sesion.call_tool("indexar_proyecto", {}), timeout=30
                         )
                         self.assertFalse(indexado.isError)
                         resultado = await asyncio.wait_for(
-                            sesion.call_tool("buscar_codigo", {"consulta": "login"}), timeout=30
+                            sesion.call_tool(
+                                "buscar_codigo",
+                                {"consulta": "consulta-privada-7f38"},
+                            ),
+                            timeout=30,
                         )
                         self.assertFalse(resultado.isError)
                         self.assertIn("auth.py", resultado.content[0].text)
                         self.assertIn("def login", resultado.content[0].text)
+                        lectura = await asyncio.wait_for(
+                            sesion.call_tool(
+                                "leer_lineas",
+                                {"ruta": "auth.py", "linea": 1, "margen": 0},
+                            ),
+                            timeout=30,
+                        )
+                        self.assertFalse(lectura.isError)
+                        self.assertIn('"linea_inicio": 1', lectura.content[0].text)
+                        self.assertIn('"linea_fin": 1', lectura.content[0].text)
+                        self.assertIn("def login(): pass", lectura.content[0].text)
                 log = (Path(temporal) / "logs" / "mcp-busqueda.log").read_text(encoding="utf-8")
                 self.assertIn("indexar_proyecto: listo", log)
                 self.assertIn("buscar_codigo: 1 resultados", log)
+                self.assertIn("buscar_codigo: fallo (RuntimeError)", log)
+                self.assertIn("leer_lineas: listo", log)
+                self.assertNotIn("Primero ejecuta la herramienta indexar_proyecto", log)
+                self.assertNotIn("consulta-privada-7f38", log)
+                self.assertNotIn("def login(): pass", log)
+                self.assertNotIn("auth.py", log)
+                self.assertNotIn(str(proyecto), log)
             finally:
                 servidor.shutdown()
                 servidor.server_close()

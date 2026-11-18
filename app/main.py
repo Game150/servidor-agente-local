@@ -548,19 +548,24 @@ def _preparar_skills(payload: dict, agente_id: str | None = None) -> dict:
     ):
         raise HTTPException(status_code=400, detail="skills debe ser una lista de hasta 3 nombres distintos.")
     try:
-        skills = listar_skills()
+        catalogo = listar_skills()
     except ValueError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
-    _registrar_catalogo_skills(app, skills)
+    _registrar_catalogo_skills(app, catalogo)
+    skills = skills_del_agente(catalogo, agente_id)
     for nombre in seleccion:
-        if nombre not in skills:
+        if nombre not in catalogo:
             raise HTTPException(status_code=400, detail=f"No existe la skill: {nombre}")
+        if nombre not in skills:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La skill no está habilitada para el agente activo: {nombre}",
+            )
     for nombre in seleccion:
         payload["messages"][0]["content"] += (
             f"\n\nInstrucciones de la skill {nombre}:\n{skills[nombre]['content']}"
         )
         logger.info("Skill cargada: %s (seleccion explicita)", nombre)
-    skills = skills_del_agente(skills, agente_id)
     if not seleccion:
         nombre = elegir_skill(_texto_ultima_peticion(payload["messages"]), skills)
         if nombre:

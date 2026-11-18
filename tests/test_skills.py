@@ -173,6 +173,14 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(skills.skills_del_agente(catalogo, "desarrollador")), {"ejemplo"})
         payload = {"messages": [{"role": "system", "content": "Sistema"}]}
         self.assertEqual(set(main._preparar_skills(payload, "desarrollador")), {"ejemplo"})
+        payload = {
+            "messages": [{"role": "system", "content": "Sistema"}],
+            "skills": ["solo-trabajo"],
+        }
+        with self.assertRaises(HTTPException) as error:
+            main._preparar_skills(payload, "desarrollador")
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertNotIn("Instrucciones.", payload["messages"][0]["content"])
 
     def test_inyecta_herramientas_antes_de_la_ultima_pregunta(self):
         catalogo = skills.listar_skills()
