@@ -45,7 +45,7 @@ class IndiceCodigoTests(unittest.TestCase):
             self.assertEqual(resultados[0]["ruta"], "auth.py")
             self.assertEqual(resultados[0]["linea_inicio"], 1)
             self.assertEqual(resultados[0]["linea_fin"], 2)
-            with sqlite3.connect(self.indice.ruta) as conexion:
+            with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
                 filas = conexion.execute(
                     """
                     SELECT f.ruta
@@ -63,7 +63,7 @@ class IndiceCodigoTests(unittest.TestCase):
             resumen = self.indice.indexar()
             self.assertEqual(resumen["actualizados"], 1)
             self.assertEqual(resumen["eliminados"], 1)
-            with sqlite3.connect(self.indice.ruta) as conexion:
+            with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
                 antiguos = conexion.execute(
                     "SELECT rowid FROM fragmentos_fts WHERE fragmentos_fts MATCH ?",
                     ('"login"',),
@@ -74,7 +74,7 @@ class IndiceCodigoTests(unittest.TestCase):
                 ).fetchall()
             self.assertEqual(antiguos, [])
             self.assertEqual(len(nuevos), 1)
-            with sqlite3.connect(self.indice.ruta) as conexion:
+            with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
                 conexion.execute(
                     "INSERT INTO fragmentos_fts(fragmentos_fts, rank) "
                     "VALUES ('integrity-check', 1)"
@@ -155,7 +155,7 @@ class IndiceCodigoTests(unittest.TestCase):
 
     def test_indice_existente_se_migra_sin_perder_vectores(self):
         self.indice.ruta.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.indice.ruta) as conexion:
+        with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
             conexion.executescript("""
                 CREATE TABLE metadata (clave TEXT PRIMARY KEY, valor TEXT NOT NULL);
                 CREATE TABLE archivos (ruta TEXT PRIMARY KEY, hash TEXT NOT NULL);
@@ -198,14 +198,14 @@ class IndiceCodigoTests(unittest.TestCase):
                 reabierto.buscar("legacy_identifier", 1)[0]["texto"],
                 "legacy_identifier()",
             )
-        with sqlite3.connect(self.indice.ruta) as conexion:
+        with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
             vector = conexion.execute("SELECT vector FROM fragmentos").fetchone()[0]
         self.assertEqual(json.loads(vector), [1.0, 0.0])
 
     def test_migracion_interrumpida_revierte_solo_cambios_fts(self):
         with patch.object(self.indice, "_embedding", side_effect=self.vector):
             self.indice.indexar()
-        with sqlite3.connect(self.indice.ruta) as conexion:
+        with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
             conexion.execute("DROP TRIGGER fragmentos_fts_insert")
             conexion.execute("DROP TRIGGER fragmentos_fts_delete")
             conexion.execute("DROP TRIGGER fragmentos_fts_update")
@@ -231,7 +231,7 @@ class IndiceCodigoTests(unittest.TestCase):
             IndiceCodigo._asegurar_fts5(FalloDuranteRebuild(conexion))
         conexion.close()
 
-        with sqlite3.connect(self.indice.ruta) as conexion:
+        with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
             self.assertEqual(
                 conexion.execute(
                     "SELECT ruta, inicio, fin, texto, vector FROM fragmentos ORDER BY rowid"
@@ -270,7 +270,7 @@ class IndiceCodigoTests(unittest.TestCase):
                 lectura = ejecutor.submit(buscar)
                 escritura.result(timeout=30)
                 lectura.result(timeout=30)
-        with sqlite3.connect(self.indice.ruta) as conexion:
+        with closing(sqlite3.connect(self.indice.ruta)) as conexion, conexion:
             self.assertEqual(conexion.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             conexion.execute(
                 "INSERT INTO fragmentos_fts(fragmentos_fts, rank) "

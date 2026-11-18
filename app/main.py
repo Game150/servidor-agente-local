@@ -200,6 +200,30 @@ HERRAMIENTA_BUSQUEDA_CODIGO = {
     },
 }
 
+HERRAMIENTA_INDEXAR_CODIGO = {
+    "type": "function",
+    "function": {
+        "name": "indexar_proyecto",
+        "description": (
+            "Crea o actualiza el índice semántico del workspace configurado "
+            "en CODE_SEARCH_WORKSPACE. Úsala solo si el usuario pide indexar "
+            "o actualizar el proyecto. reconstruir=true recalcula todos los "
+            "vectores y solo debe usarse si el usuario lo solicita."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reconstruir": {
+                    "type": "boolean",
+                    "description": "Recalcular todos los vectores; predeterminado false.",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 # --- Ciclo de vida -----------------------------------------------------------
 
@@ -513,7 +537,10 @@ def _agregar_herramienta_busqueda(
         if isinstance(funcion, dict) and (
             (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
             or (skills and funcion.get("name") == "cargar_skill")
-            or (codigo and funcion.get("name") == "buscar_codigo")
+            or (
+                codigo
+                and funcion.get("name") in ("buscar_codigo", "indexar_proyecto")
+            )
         ):
             raise HTTPException(
                 status_code=400,
@@ -523,6 +550,7 @@ def _agregar_herramienta_busqueda(
     internas = [HERRAMIENTA_SKILL] if skills else []
     if codigo:
         internas.append(HERRAMIENTA_BUSQUEDA_CODIGO)
+        internas.append(HERRAMIENTA_INDEXAR_CODIGO)
     if WEB_SEARCH_ENABLED:
         internas.append(HERRAMIENTA_BUSQUEDA_WEB)
     if herramientas or internas:
@@ -604,7 +632,12 @@ def _bloque_herramientas(
     if WEB_SEARCH_ENABLED:
         lineas.append(f"- buscar_en_web: {HERRAMIENTA_BUSQUEDA_WEB['function']['description']}")
     if codigo:
+        lineas.append(
+            "Usa indexar_proyecto solo cuando el usuario solicite indexar o "
+            "actualizar el proyecto; para buscar código, usa buscar_codigo."
+        )
         lineas.append(f"- buscar_codigo: {HERRAMIENTA_BUSQUEDA_CODIGO['function']['description']}")
+        lineas.append(f"- indexar_proyecto: {HERRAMIENTA_INDEXAR_CODIGO['function']['description']}")
     if skills:
         lineas.append(
             "Si la tarea principal coincide claramente con la descripción de una skill, llama cargar_skill antes de "
@@ -654,7 +687,10 @@ def _es_herramienta_interna(llamada: dict, skills: dict, codigo: bool = False) -
     return isinstance(funcion, dict) and (
         (WEB_SEARCH_ENABLED and funcion.get("name") == "buscar_en_web")
         or (bool(skills) and funcion.get("name") == "cargar_skill")
-        or (codigo and funcion.get("name") == "buscar_codigo")
+        or (
+            codigo
+            and funcion.get("name") in ("buscar_codigo", "indexar_proyecto")
+        )
     )
 
 def _usar_busqueda_codigo(payload: dict) -> bool:
@@ -690,6 +726,8 @@ async def _ejecutar_herramientas(
             identificador, argumento = _validar_llamadas_busqueda([llamada])[0]
         elif funcion["name"] == "buscar_codigo":
             identificador, argumento = _validar_llamada_codigo(llamada)
+        elif funcion["name"] == "indexar_proyecto":
+            identificador, argumento = _validar_llamada_indexar_codigo(llamada)
         else:
             identificador = llamada.get("id")
             argumentos = funcion.get("arguments")
@@ -732,6 +770,8 @@ async def _ejecutar_herramientas(
             logger.info("Busqueda web completada.")
         elif nombre == "buscar_codigo":
             resultado = await _buscar_codigo_interno(argumento["consulta"], argumento["limite"])
+        elif nombre == "indexar_proyecto":
+            resultado = await _indexar_codigo_interno(argumento["reconstruir"])
         elif argumento not in skills:
             logger.warning("Skill solicitada no disponible en el catalogo local.")
             resultado = (
@@ -776,19 +816,77 @@ def _validar_llamada_codigo(llamada: dict) -> tuple[str, dict]:
     return identificador, {"consulta": datos["consulta"].strip(), "limite": datos.get("limite", 3)}
 
 
-async def _buscar_codigo_interno(consulta: str, limite: int) -> str:
+def _validar_llamada_indexar_codigo(llamada: dict) -> tuple[str, dict]:
+    identificador = llamada.get("id")
+    funcion = llamada.get("function")
+    argumentos = funcion.get("arguments") if isinstance(funcion, dict) else None
+    if (
+        llamada.get("type") != "function"
+        or not isinstance(identificador, str)
+        or not identificador
+        or len(identificador) > 128
+        or not isinstance(argumentos, str)
+        or len(argumentos) > 128
+    ):
+        raise HTTPException(status_code=502, detail="La llamada a indexar_proyecto es invalida.")
+    try:
+        datos = json.loads(argumentos)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=502, detail="Los argumentos de indexar_proyecto no contienen JSON valido.") from error
+    if (
+        not isinstance(datos, dict)
+        or not set(datos) <= {"reconstruir"}
+        or ("reconstruir" in datos and type(datos["reconstruir"]) is not bool)
+    ):
+        raise HTTPException(status_code=502, detail="Los argumentos de indexar_proyecto son invalidos.")
+    return identificador, {"reconstruir": datos.get("reconstruir", False)}
+
+
+def _crear_indice_codigo_interno() -> IndiceCodigo:
     if CODE_SEARCH_WORKSPACE is None:
         raise HTTPException(status_code=503, detail="Configura CODE_SEARCH_WORKSPACE para buscar codigo.")
+    return IndiceCodigo(
+        CODE_SEARCH_WORKSPACE,
+        LOG_DIR / "indices",
+        motor_embeddings.url,
+        EMBEDDINGS_MODEL,
+        "",
+        (CODE_SEARCH_DOCUMENT_PREFIX + " ") if CODE_SEARCH_DOCUMENT_PREFIX else "",
+        (CODE_SEARCH_QUERY_PREFIX + " ") if CODE_SEARCH_QUERY_PREFIX else "",
+        modelo_peticion="local",
+    )
+
+
+async def _indexar_codigo_interno(reconstruir: bool = False) -> str:
+    logger.info("Indexacion de codigo iniciada: reconstruir=%s.", reconstruir)
+    try:
+        indice = _crear_indice_codigo_interno()
+        await _asegurar_motor_embeddings()
+        resultado = await asyncio.to_thread(indice.indexar, reconstruir)
+    except HTTPException as error:
+        logger.warning("Indexacion de codigo fallida (HTTP %s).", error.status_code)
+        raise
+    except (OSError, sqlite3.Error, ValueError, RuntimeError) as error:
+        logger.warning("Indexacion de codigo fallida (%s).", type(error).__name__)
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    logger.info(
+        "Indexacion de codigo completada: archivos=%d actualizados=%d eliminados=%d "
+        "omitidos=%d fragmentos=%d.",
+        resultado["archivos"],
+        resultado["actualizados"],
+        resultado["eliminados"],
+        resultado["omitidos"],
+        resultado["fragmentos"],
+    )
+    return json.dumps({"resultado": resultado}, ensure_ascii=False)
+
+
+async def _buscar_codigo_interno(consulta: str, limite: int) -> str:
     logger.info("Busqueda de codigo iniciada.")
     try:
-        indice = IndiceCodigo(
-            CODE_SEARCH_WORKSPACE, LOG_DIR / "indices", motor_embeddings.url, EMBEDDINGS_MODEL, "",
-            (CODE_SEARCH_DOCUMENT_PREFIX + " ") if CODE_SEARCH_DOCUMENT_PREFIX else "",
-            (CODE_SEARCH_QUERY_PREFIX + " ") if CODE_SEARCH_QUERY_PREFIX else "",
-            modelo_peticion="local",
-        )
+        indice = _crear_indice_codigo_interno()
         if not indice.ruta.is_file():
-            raise RuntimeError("No existe el indice del proyecto; ejecuta indexar_proyecto desde el MCP.")
+            raise RuntimeError("No existe el indice del proyecto; solicita indexar_proyecto antes de buscar.")
         await _asegurar_motor_embeddings()
         resultados = await asyncio.to_thread(indice.buscar, consulta, limite)
     except HTTPException as error:

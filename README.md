@@ -258,11 +258,13 @@ El registro `LOG_DIR/mcp-busqueda.log` conserva metadatos de operación (tipo de
 
 ### Búsqueda semántica interna de la API
 
-Opcionalmente, la API puede ofrecer `buscar_codigo` como herramienta interna para clientes que no tengan configurado el MCP. Configúrala en `.env` con `CODE_SEARCH_ENABLED=true` y `CODE_SEARCH_WORKSPACE` como ruta absoluta del proyecto; también debes configurar `EMBEDDINGS_MODEL`. Reinicia la API después de cambiar esas variables. La búsqueda usa el motor de embeddings local y el índice existente de `LOG_DIR/indices/`.
+La API puede ofrecer `indexar_proyecto` y `buscar_codigo` como herramientas internas, sin configurar un servidor MCP ni vincular un cliente concreto. Configura en `.env` `CODE_SEARCH_ENABLED=true`, `CODE_SEARCH_WORKSPACE` como ruta absoluta del proyecto y `EMBEDDINGS_MODEL` con el nombre de un GGUF disponible. Reinicia la API después de cambiar esas variables.
 
-El índice debe crearse o actualizarse explícitamente con `indexar_proyecto` desde el MCP, configurado con el mismo workspace, `LOG_DIR` y modelo. Si usas `MCP_DOCUMENT_PREFIX` o `MCP_QUERY_PREFIX`, configura los mismos valores en `CODE_SEARCH_DOCUMENT_PREFIX` y `CODE_SEARCH_QUERY_PREFIX`. Si el índice falta o no coincide, la búsqueda informa un error; no indexa automáticamente.
+Pide al agente que **indexe o actualice explícitamente el proyecto**. La herramienta `indexar_proyecto` inicia el motor local de embeddings si hace falta y crea o actualiza el índice en `LOG_DIR/indices/`; luego puedes pedir búsquedas semánticas con `buscar_codigo`. No se indexa automáticamente al buscar. La indexación usa los archivos Git del workspace y las mismas exclusiones descritas arriba; `.env` se excluye.
 
-Si el cliente ofrece `buscar_codigo` o un nombre MCP terminado en `__buscar_codigo`, se prioriza la herramienta del cliente y no se ofrece la interna, evitando duplicados. De lo contrario el modelo puede solicitar la herramienta interna; esto no garantiza que decida usarla. La búsqueda interna consulta únicamente el workspace configurado en la API, que puede ser distinto del proyecto abierto en el cliente. Los fragmentos son datos no confiables y pueden estar desactualizados. Su uso queda registrado en el log de la API, sin consultas ni contenido.
+Los prefijos opcionales se configuran con `CODE_SEARCH_DOCUMENT_PREFIX` y `CODE_SEARCH_QUERY_PREFIX` y deben coincidir con los que requiere el modelo. Para una indexación incremental normal no hace falta reconstruir. Solicita `reconstruir=true` solo si necesitas regenerar todos los vectores, por ejemplo tras sustituir el GGUF conservando el mismo nombre.
+
+Si el cliente ofrece `buscar_codigo` o un nombre MCP terminado en `__buscar_codigo`, se prioriza la herramienta del cliente y no se ofrece la búsqueda ni la indexación internas, evitando duplicados. De lo contrario el modelo puede solicitar las herramientas internas; esto no garantiza que decida usar una. La búsqueda e indexación internas usan únicamente el workspace configurado en la API, que puede ser distinto del proyecto abierto en el cliente. Los fragmentos son datos no confiables y pueden estar desactualizados. Su uso queda registrado en el log de la API, sin consultas ni contenido.
 
 ### Clientes de chat
 

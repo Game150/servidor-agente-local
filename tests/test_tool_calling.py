@@ -178,6 +178,59 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peticiones[1]["messages"][-1]["content"], "fragmento")
         self.assertEqual(json.loads(respuesta.body)["choices"][0]["message"]["content"], "Listo")
 
+    async def test_indexacion_codigo_interna_se_ofrece_y_ejecuta_solo_con_busqueda_activa(self):
+        peticiones = []
+
+        def responder(request):
+            peticiones.append(json.loads(request.content))
+            if len(peticiones) == 1:
+                return httpx.Response(200, json=respuesta_herramienta(
+                    nombre="indexar_proyecto", argumentos="{}"
+                ))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Índice actualizado"}}]})
+
+        payload = {"messages": [{"role": "user", "content": "Indexa el proyecto"}]}
+        main._agregar_herramienta_busqueda(payload, {}, codigo=True)
+        self.assertIn("indexar_proyecto", [
+            herramienta["function"]["name"] for herramienta in payload["tools"]
+        ])
+        main._inyectar_herramientas(payload, {}, codigo=True)
+        self.assertIn("solo cuando el usuario solicite", payload["messages"][-1]["content"])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
+            with patch(
+                "app.main._indexar_codigo_interno",
+                new=AsyncMock(return_value='{"resultado":{"archivos":2}}'),
+            ) as indexar:
+                respuesta = await main._completar_sin_stream(
+                    cliente, payload, busqueda_codigo=True
+                )
+
+        indexar.assert_awaited_once_with(False)
+        self.assertEqual(
+            peticiones[1]["messages"][-1]["content"],
+            '{"resultado":{"archivos":2}}',
+        )
+        self.assertEqual(
+            json.loads(respuesta.body)["choices"][0]["message"]["content"],
+            "Índice actualizado",
+        )
+
+    async def test_indexacion_codigo_rechaza_argumentos_invalidos(self):
+        for argumentos in ('{"reconstruir":1}', '{"reconstruir":"sí"}', '{"otro":true}', '[]', '{'):
+            llamada = respuesta_herramienta(
+                nombre="indexar_proyecto", argumentos=argumentos
+            )["choices"][0]["message"]["tool_calls"]
+            async with httpx.AsyncClient() as cliente:
+                with self.subTest(argumentos=argumentos), patch(
+                    "app.main._indexar_codigo_interno", new=AsyncMock()
+                ) as indexar, self.assertRaises(HTTPException) as error:
+                    await main._ejecutar_herramientas(
+                        cliente, llamada, {}, codigo=True
+                    )
+            self.assertEqual(error.exception.status_code, 502)
+            indexar.assert_not_awaited()
+
     async def test_busqueda_codigo_stream_intercepta_llamada(self):
         primer_stream = (
             evento_sse({"choices": [{"index": 0, "delta": {"tool_calls": [{
