@@ -21,11 +21,11 @@ parametros:
 motor:
   # 32768 es el contexto nativo del modelo.
   ctx_size: 32768
-  batch_size: 2048
-  ubatch_size: 512
+  batch_size: 256
+  ubatch_size: 256
   gpu_layers: 99
   threads: 4
-  extra_args: ["--threads-batch", "6"]
+  extra_args: ["--threads-batch", "6", "--load-mode", "mlock"]
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0

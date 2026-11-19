@@ -216,6 +216,34 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
             "Índice actualizado",
         )
 
+    async def test_indexacion_codigo_registra_workspace_indice_y_modelo(self):
+        proyecto = Path("C:/workspace-prueba")
+        indice = Mock(
+            proyecto=proyecto,
+            ruta=Path("C:/indices/codigo-test.sqlite3"),
+            modelo="modelo-prueba",
+        )
+        resumen = {
+            "archivos": 2,
+            "actualizados": 1,
+            "eliminados": 0,
+            "omitidos": 0,
+            "fragmentos": 3,
+        }
+
+        with (
+            patch("app.main._crear_indice_codigo_interno", return_value=indice),
+            patch("app.main._asegurar_motor_embeddings", new=AsyncMock()),
+            patch("app.main.asyncio.to_thread", new=AsyncMock(return_value=resumen)),
+            self.assertLogs("uvicorn.error", level="INFO") as registro,
+        ):
+            resultado = await main._indexar_codigo_interno()
+
+        self.assertIn(str(proyecto), "\n".join(registro.output))
+        self.assertIn(str(indice.ruta), "\n".join(registro.output))
+        self.assertIn("modelo_embeddings=modelo-prueba", "\n".join(registro.output))
+        self.assertEqual(json.loads(resultado), {"resultado": resumen})
+
     async def test_indexacion_codigo_rechaza_argumentos_invalidos(self):
         for argumentos in ('{"reconstruir":1}', '{"reconstruir":"sí"}', '{"otro":true}', '[]', '{'):
             llamada = respuesta_herramienta(

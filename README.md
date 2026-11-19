@@ -260,6 +260,8 @@ El registro `LOG_DIR/mcp-busqueda.log` conserva metadatos de operación (tipo de
 
 La API puede ofrecer `indexar_proyecto` y `buscar_codigo` como herramientas internas, sin configurar un servidor MCP ni vincular un cliente concreto. Configura en `.env` `CODE_SEARCH_ENABLED=true`, `CODE_SEARCH_WORKSPACE` como ruta absoluta del proyecto y `EMBEDDINGS_MODEL` con el nombre de un GGUF disponible. Reinicia la API después de cambiar esas variables.
 
+Al iniciar, la API registra si la búsqueda está habilitada y, si lo está, el workspace configurado, el directorio del índice y el modelo de embeddings. Al empezar una indexación vuelve a registrar el workspace y la ruta del índice; así puedes confirmar en el log qué proyecto está usando.
+
 Pide al agente que **indexe o actualice explícitamente el proyecto**. La herramienta `indexar_proyecto` inicia el motor local de embeddings si hace falta y crea o actualiza el índice en `LOG_DIR/indices/`; luego puedes pedir búsquedas semánticas con `buscar_codigo`. No se indexa automáticamente al buscar. La indexación usa los archivos Git del workspace y las mismas exclusiones descritas arriba; `.env` se excluye.
 
 Los prefijos opcionales se configuran con `CODE_SEARCH_DOCUMENT_PREFIX` y `CODE_SEARCH_QUERY_PREFIX` y deben coincidir con los que requiere el modelo. Para una indexación incremental normal no hace falta reconstruir. Solicita `reconstruir=true` solo si necesitas regenerar todos los vectores, por ejemplo tras sustituir el GGUF conservando el mismo nombre.
@@ -596,6 +598,7 @@ Los parámetros del bloque `motor` permiten ajustar el uso de recursos:
 - `ubatch_size`: tamaño máximo del microbatch físico, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, `ubatch_size: 512`. Si se omite, se usa el valor predeterminado de llama.cpp. Conviene mantenerlo igual o menor que `batch_size`; un valor mayor puede consumir más memoria y no garantiza mayor velocidad. Al cambiarlo se reinicia el motor en la siguiente solicitud. No lo declares también mediante `extra_args`, para evitar argumentos duplicados.
 - `gpu_layers`: cantidad de capas que llama.cpp intenta ejecutar en la GPU. `99` intenta descargar tantas como sea posible.
 - `parallel`: cantidad de solicitudes que el motor puede atender en paralelo; más paralelismo puede consumir más memoria y reducir el contexto disponible por solicitud.
+- Los agentes incluidos usan `--load-mode mlock` en `motor.extra_args`: desactiva `mmap` y solicita mantener los pesos del modelo en RAM sin que el sistema los pagine o comprima. El sistema operativo puede limitar el bloqueo de memoria; si no puede bloquear suficientes páginas, el inicio puede fallar. No implica por sí mismo mayor velocidad de generación.
 
 Cambia un valor por vez y compara el resultado. No hay una configuración óptima universal: depende del modelo, su cuantización y el hardware.
 

@@ -35,11 +35,24 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, main.app.state, "catalogo_skills", anterior)
 
     async def test_registra_catalogo_al_iniciar(self):
-        with patch.object(main.motor, "detener"):
-            with self.assertLogs("uvicorn.error", level="INFO") as registro:
-                async with main.lifespan(main.app):
-                    pass
+        with (
+            patch.object(main, "CODE_SEARCH_ENABLED", True),
+            patch.object(main, "CODE_SEARCH_WORKSPACE", self.raiz),
+            patch.object(main, "EMBEDDINGS_MODEL", "modelo-prueba"),
+            patch.object(main.motor, "detener"),
+            patch.object(main.motor_embeddings, "detener"),
+            self.assertLogs("uvicorn.error", level="INFO") as registro,
+        ):
+            async with main.lifespan(main.app):
+                pass
         self.assertIn("INFO:uvicorn.error:Skills disponibles: ejemplo", registro.output)
+        self.assertTrue(any(
+            "Búsqueda semántica interna habilitada: "
+            f"workspace={self.raiz}" in linea
+            and "modelo_embeddings=modelo-prueba" in linea
+            and "índice=" in linea
+            for linea in registro.output
+        ))
         self.assertNotIn("Responde usando", "\n".join(registro.output))
 
     async def test_timeout_de_inferencia_en_minutos_o_ilimitado(self):

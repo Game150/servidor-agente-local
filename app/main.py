@@ -235,6 +235,17 @@ async def lifespan(app: FastAPI):
     except (OSError, ValueError) as error:
         logger.warning("No se pudo listar las skills locales: %s", error)
 
+    if CODE_SEARCH_ENABLED:
+        logger.info(
+            "Búsqueda semántica interna habilitada: workspace=%s, índice=%s, "
+            "modelo_embeddings=%s.",
+            CODE_SEARCH_WORKSPACE,
+            LOG_DIR / "indices",
+            EMBEDDINGS_MODEL,
+        )
+    else:
+        logger.info("Búsqueda semántica interna deshabilitada.")
+
     # Un único cliente HTTP compartido. trust_env=False evita que un proxy del
     # sistema intercepte las llamadas a localhost.
     app.state.http = httpx.AsyncClient(
@@ -858,9 +869,16 @@ def _crear_indice_codigo_interno() -> IndiceCodigo:
 
 
 async def _indexar_codigo_interno(reconstruir: bool = False) -> str:
-    logger.info("Indexacion de codigo iniciada: reconstruir=%s.", reconstruir)
     try:
         indice = _crear_indice_codigo_interno()
+        logger.info(
+            "Indexacion de codigo iniciada: workspace=%s, indice=%s, "
+            "modelo_embeddings=%s, reconstruir=%s.",
+            indice.proyecto,
+            indice.ruta,
+            indice.modelo,
+            reconstruir,
+        )
         await _asegurar_motor_embeddings()
         resultado = await asyncio.to_thread(indice.indexar, reconstruir)
     except HTTPException as error:
