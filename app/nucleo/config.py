@@ -138,11 +138,15 @@ def resolver_llama_server() -> Path | None:
 
     Orden de búsqueda:
       1. Variable LLAMA_SERVER_PATH (archivo o carpeta que lo contiene).
-      2. Cualquier carpeta `llama*` en la raíz del proyecto (se usa la más
-         reciente, así no hay que renombrar nada al actualizar llama.cpp).
-      3. El PATH del sistema.
+      2. Carpetas `llama*` en la raíz del proyecto, filtradas por LLAMA_BACKEND.
+      3. El PATH del sistema, solo cuando LLAMA_BACKEND es `auto`.
     """
     nombre = nombre_binario()
+    backend = os.getenv("LLAMA_BACKEND", "auto").strip().lower() or "auto"
+
+    if backend not in ("auto", "vulkan", "rocm"):
+        raise ValueError("LLAMA_BACKEND debe ser auto, vulkan o rocm.")
+
     explicito = os.getenv("LLAMA_SERVER_PATH", "").strip()
 
     if explicito:
@@ -161,6 +165,23 @@ def resolver_llama_server() -> Path | None:
         for ruta in BASE_DIR.glob(f"llama*/**/{nombre}")
         if ruta.is_file()
     ]
+
+    if backend != "auto":
+        candidatos = [
+            ruta
+            for ruta in candidatos
+            if any(
+                backend in parte.lower()
+                for parte in ruta.relative_to(BASE_DIR).parts
+            )
+        ]
+
+        if not candidatos:
+            raise FileNotFoundError(
+                f"LLAMA_BACKEND={backend}, pero no se encontró llama-server "
+                f"en una carpeta 'llama*' cuyo nombre contenga '{backend}'. "
+                "Define LLAMA_SERVER_PATH para indicar otra ubicación."
+            )
 
     if candidatos:
         return max(candidatos, key=lambda ruta: ruta.stat().st_mtime)

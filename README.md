@@ -47,6 +47,7 @@ servidor-agente-local/
 ```
 
 También puedes guardar `llama-server.exe` en el `PATH` o indicar su ubicación exacta en `LLAMA_SERVER_PATH`, en el archivo `.env`.
+Si tienes más de una compilación en carpetas `llama*`, puedes seleccionar el backend con `LLAMA_BACKEND=auto`, `vulkan` o `rocm`.
 
 Crea la carpeta `models` y coloca dentro el archivo `.gguf` que quieras usar:
 
@@ -69,6 +70,7 @@ Abre `.env` y revisa estos valores:
 ```env
 MODELS_DIR=models
 LLAMA_SERVER_PATH=
+LLAMA_BACKEND=auto
 LLAMA_HOST=127.0.0.1
 LLAMA_PORT=8080
 API_KEY=
@@ -77,6 +79,7 @@ SEARXNG_URL=http://127.0.0.1:8888
 
 - `MODELS_DIR`: carpeta con tus archivos `.gguf`. Acepta una ruta absoluta, por ejemplo `D:\Modelos`, además de `models`.
 - `LLAMA_SERVER_PATH`: opcional. Déjalo vacío si el ejecutable está dentro de una carpeta `llama*` del proyecto o en el `PATH`.
+- `LLAMA_BACKEND`: `auto` (predeterminado) conserva el comportamiento actual y elige la compilación más reciente del proyecto; `vulkan` o `rocm` eligen la más reciente cuya carpeta `llama*` incluya ese nombre. Esta selección requiere que la carpeta identifique el backend. `LLAMA_SERVER_PATH`, si está definido, tiene prioridad y permite elegir un ejecutable o una carpeta concreta.
 - `LLAMA_HOST` y `LLAMA_PORT`: dirección interna de llama.cpp. Déjalos como están salvo que necesites cambiarla.
 - `API_KEY`: opcional para uso local. Si la defines, todos los endpoints salvo `/` requieren el encabezado `Authorization: Bearer TU_CLAVE`. Usa una clave propia y no compartas ni subas `.env`.
 - `SEARXNG_URL`: dirección base de tu instancia SearXNG, sin `/search`. El valor mostrado arriba es un **ejemplo** para una instancia en el mismo equipo; debes añadirlo o descomentarlo en `.env` y ajustarlo. Si no lo defines, el código usa `http://192.168.10.254:8888`, una dirección de red local que probablemente no corresponda a tu instalación.

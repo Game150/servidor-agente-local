@@ -1,9 +1,11 @@
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.nucleo.config import BASE_DIR
+from app.nucleo.config import BASE_DIR, resolver_llama_server
 from app.servicios.motor_inferencia import (
     MotorInferencia,
     construir_argumentos,
@@ -14,6 +16,77 @@ from app.servicios.registro_agentes import _validar_motor
 
 
 class LogDeCargaTests(unittest.TestCase):
+    def test_llama_backend_selecciona_vulkan_o_rocm_por_nombre_de_carpeta(self):
+        with tempfile.TemporaryDirectory() as temporal:
+            raiz = Path(temporal)
+            vulkan = raiz / "llama-b1-win-vulkan" / "llama-server.exe"
+            rocm = raiz / "llama-b2-win-rocm-gfx103x" / "llama-server.exe"
+            vulkan.parent.mkdir()
+            rocm.parent.mkdir()
+            vulkan.touch()
+            rocm.touch()
+
+            with patch("app.nucleo.config.BASE_DIR", raiz), patch.dict(
+                os.environ,
+                {"LLAMA_SERVER_PATH": "", "LLAMA_BACKEND": "vulkan"},
+            ), patch("app.nucleo.config.shutil.which", return_value=None):
+                self.assertEqual(resolver_llama_server(), vulkan)
+
+            with patch("app.nucleo.config.BASE_DIR", raiz), patch.dict(
+                os.environ,
+                {"LLAMA_SERVER_PATH": "", "LLAMA_BACKEND": "rocm"},
+            ), patch("app.nucleo.config.shutil.which", return_value=None):
+                self.assertEqual(resolver_llama_server(), rocm)
+
+    def test_llama_backend_auto_conserva_seleccion_mas_reciente(self):
+        with tempfile.TemporaryDirectory() as temporal:
+            raiz = Path(temporal)
+            vulkan = raiz / "llama-vulkan" / "llama-server.exe"
+            rocm = raiz / "llama-rocm" / "llama-server.exe"
+            vulkan.parent.mkdir()
+            rocm.parent.mkdir()
+            vulkan.touch()
+            rocm.touch()
+            os.utime(vulkan, (1, 1))
+
+            with patch("app.nucleo.config.BASE_DIR", raiz), patch.dict(
+                os.environ,
+                {"LLAMA_SERVER_PATH": "", "LLAMA_BACKEND": "auto"},
+            ), patch("app.nucleo.config.shutil.which", return_value=None):
+                self.assertEqual(resolver_llama_server(), rocm)
+
+    def test_llama_backend_invalido_o_inexistente_falla_explicito(self):
+        with tempfile.TemporaryDirectory() as temporal:
+            with patch("app.nucleo.config.BASE_DIR", Path(temporal)), patch.dict(
+                os.environ,
+                {"LLAMA_SERVER_PATH": "", "LLAMA_BACKEND": "directml"},
+            ):
+                with self.assertRaisesRegex(ValueError, "LLAMA_BACKEND"):
+                    resolver_llama_server()
+
+            with patch("app.nucleo.config.BASE_DIR", Path(temporal)), patch.dict(
+                os.environ,
+                {"LLAMA_SERVER_PATH": "", "LLAMA_BACKEND": "rocm"},
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "LLAMA_BACKEND=rocm"):
+                    resolver_llama_server()
+
+    def test_llama_server_path_explicito_tiene_prioridad_sobre_backend(self):
+        with tempfile.TemporaryDirectory() as temporal:
+            raiz = Path(temporal)
+            binario = raiz / "custom" / "llama-server.exe"
+            binario.parent.mkdir()
+            binario.touch()
+
+            with patch("app.nucleo.config.BASE_DIR", raiz), patch.dict(
+                os.environ,
+                {
+                    "LLAMA_SERVER_PATH": str(binario),
+                    "LLAMA_BACKEND": "vulkan",
+                },
+            ):
+                self.assertEqual(resolver_llama_server(), binario)
+
     def test_asegurar_registra_modelo_cargado(self):
         agente = {
             "id": "demo",
