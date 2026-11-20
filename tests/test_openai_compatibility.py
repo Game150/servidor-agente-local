@@ -71,6 +71,7 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "temperature": 0.3,
                 "top_p": 0.9,
                 "max_tokens": 256,
+                "reasoning_budget_tokens": 1024,
                 "forzar": False,
             },
         }
@@ -125,6 +126,7 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
             payload_motor = peticiones_motor[0]
             self.assertEqual(payload_motor["model"], "local")
             self.assertEqual(payload_motor["max_tokens"], 128)
+            self.assertEqual(payload_motor["reasoning_budget_tokens"], 1024)
             self.assertEqual(payload_motor["messages"][0]["role"], "system")
             self.assertIn("Responde de forma concisa.", payload_motor["messages"][0]["content"])
         finally:

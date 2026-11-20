@@ -68,6 +68,14 @@ class McpBusquedaTests(unittest.IsolatedAsyncioTestCase):
                             herramienta.name: herramienta.inputSchema
                             for herramienta in herramientas.tools
                         }
+                        descripciones = {
+                            herramienta.name: herramienta.description
+                            for herramienta in herramientas.tools
+                        }
+                        self.assertIn("predeterminado 3, máximo 5", descripciones["buscar_codigo"])
+                        self.assertIn("margen 0-30", descripciones["leer_lineas"])
+                        self.assertIn("incrementalmente", descripciones["indexar_proyecto"])
+                        self.assertIn("pide autorización", descripciones["indexar_proyecto"])
                         self.assertEqual(
                             set(esquemas["buscar_codigo"]["properties"]),
                             {"consulta", "limite"},

@@ -149,7 +149,8 @@ HERRAMIENTA_BUSQUEDA_WEB = {
         "name": "buscar_en_web",
         "description": (
             "Busca informacion actualizada o externa mediante SearXNG. "
-            "Usala cuando la respuesta dependa de datos actuales o de fuentes web."
+            "Usala cuando la respuesta dependa de datos actuales o de fuentes web. "
+            "La consulta admite hasta 500 caracteres."
         ),
         "parameters": {
             "type": "object",
@@ -170,10 +171,18 @@ HERRAMIENTA_SKILL = {
     "type": "function",
     "function": {
         "name": "cargar_skill",
-        "description": "Carga las instrucciones de una skill local por su nombre cuando sea relevante.",
+        "description": (
+            "Carga las instrucciones de una skill local relevante usando su nombre exacto. "
+            "Una skill aporta instrucciones, pero no agrega herramientas ni permisos."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "Nombre de la skill."}},
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Nombre exacto de una skill listada en el mensaje.",
+                }
+            },
             "required": ["name"],
             "additionalProperties": False,
         },
@@ -185,14 +194,27 @@ HERRAMIENTA_BUSQUEDA_CODIGO = {
     "function": {
         "name": "buscar_codigo",
         "description": (
-            "Busca por significado fragmentos del proyecto indexado. "
-            "Los resultados pueden estar desactualizados; confirma en los archivos."
+            "Busca por significado y texto fragmentos del workspace indexado. "
+            "Devuelve hasta el limite solicitado (predeterminado 3, maximo 5). "
+            "Si el indice falta o necesita actualizarse, usa indexar_proyecto cuando corresponda. "
+            "Los fragmentos pueden estar desactualizados: confirma en la fuente actual con una "
+            "herramienta de lectura disponible."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "consulta": {"type": "string", "minLength": 1, "maxLength": MAX_FRAGMENTO},
-                "limite": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTADOS},
+                "consulta": {
+                    "type": "string",
+                    "description": "Pregunta o concepto; maximo 1000 caracteres.",
+                    "minLength": 1,
+                    "maxLength": MAX_FRAGMENTO,
+                },
+                "limite": {
+                    "type": "integer",
+                    "description": "Cantidad de resultados; predeterminado 3, rango 1-5.",
+                    "minimum": 1,
+                    "maximum": MAX_RESULTADOS,
+                },
             },
             "required": ["consulta"],
             "additionalProperties": False,
@@ -205,10 +227,10 @@ HERRAMIENTA_INDEXAR_CODIGO = {
     "function": {
         "name": "indexar_proyecto",
         "description": (
-            "Crea o actualiza el índice semántico del workspace configurado "
-            "en CODE_SEARCH_WORKSPACE. Úsala solo si el usuario pide indexar "
-            "o actualizar el proyecto. reconstruir=true recalcula todos los "
-            "vectores y solo debe usarse si el usuario lo solicita."
+            "Crea o actualiza incrementalmente el indice semantico del workspace configurado. "
+            "Usala solo si el usuario pide indexar o actualizar el proyecto. Si buscar_codigo "
+            "indica que falta actualizar, explicalo y pide autorizacion antes de indexar. "
+            "reconstruir=true recalcula todos los vectores, tarda mas y requiere solicitud explicita."
         ),
         "parameters": {
             "type": "object",
@@ -638,23 +660,26 @@ def _bloque_herramientas(
     skills: dict, cargadas: frozenset = frozenset(), codigo: bool = False
 ) -> str:
     lineas = [
-        "Herramientas disponibles. Analiza primero la petición completa y usa solo las herramientas que necesites.",
+        "Herramientas disponibles para esta solicitud. Analiza la tarea y usa solo herramientas "
+        "listadas, respetando sus nombres y esquemas; no supongas acceso a archivos, terminal o MCP "
+        "si no aparece una herramienta que lo proporcione.",
     ]
     if WEB_SEARCH_ENABLED:
         lineas.append(f"- buscar_en_web: {HERRAMIENTA_BUSQUEDA_WEB['function']['description']}")
     if codigo:
         lineas.append(
-            "Usa indexar_proyecto solo cuando el usuario solicite indexar o "
-            "actualizar el proyecto; para buscar código, usa buscar_codigo."
+            "Para localizar codigo, usa buscar_codigo si esta disponible. indexar_proyecto "
+            "actualiza el indice solo cuando el usuario lo pide; si falta o esta desactualizado, "
+            "explicalo y pide autorizacion antes de indexar."
         )
         lineas.append(f"- buscar_codigo: {HERRAMIENTA_BUSQUEDA_CODIGO['function']['description']}")
         lineas.append(f"- indexar_proyecto: {HERRAMIENTA_INDEXAR_CODIGO['function']['description']}")
     if skills:
         lineas.append(
-            "Si la tarea principal coincide claramente con la descripción de una skill, llama cargar_skill antes de "
-            "usar otras herramientas y sigue sus instrucciones. Carga solo la skill más pertinente; usa más de una "
-            "únicamente si son complementarias. Si ninguna coincide claramente, no cargues una. No cargues skills "
-            "por menciones de paso."
+            "Una skill aporta instrucciones, no herramientas ni permisos. Si la tarea principal coincide claramente "
+            "con una descripción, llama cargar_skill antes de usar otras herramientas y sigue sus instrucciones. "
+            "Carga solo la mas pertinente; carga varias solo si son complementarias. Si ninguna coincide claramente, "
+            "no cargues una; ignora menciones de paso."
         )
         lineas.append(
             "- cargar_skill: carga las instrucciones de una skill local pertinente. Usa solo un nombre exacto "

@@ -49,6 +49,15 @@ class LogDeCargaTests(unittest.TestCase):
             with self.subTest(valor=valor), self.assertRaisesRegex(ValueError, "motor.batch_size"):
                 _validar_motor({"batch_size": valor}, "agente.yaml")
 
+    def test_gpu_layers_auto_se_valida_y_se_envia_al_motor(self):
+        motor = _validar_motor({"gpu_layers": "auto"}, "agente.yaml")
+        argumentos = construir_argumentos(Path("llama-server"), Path("modelo.gguf"), motor)
+        self.assertEqual(argumentos[argumentos.index("-ngl") + 1], "auto")
+
+        for valor in ("all", "automático"):
+            with self.subTest(valor=valor), self.assertRaisesRegex(ValueError, "gpu_layers"):
+                _validar_motor({"gpu_layers": valor}, "agente.yaml")
+
     def test_embeddings_usa_puerto_y_modo_independientes(self):
         argumentos = construir_argumentos(
             Path("llama-server"),

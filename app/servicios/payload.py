@@ -27,7 +27,7 @@ def construir_payload(agente: dict, solicitud: dict) -> dict:
     - Un único mensaje `system`: reglas globales, perfil e instrucciones del
       agente, seguidos de los mensajes de sistema que mande el cliente.
     - Parámetros de muestreo: los del agente son el valor por defecto; el
-      cliente los sobrescribe salvo que el agente tenga `forzar: true`.
+      cliente los sobrescribe salvo que el agente los fuerce.
     - `max_completion_tokens` se traduce a `max_tokens`.
     """
     sistema_cliente = []
@@ -57,9 +57,10 @@ def construir_payload(agente: dict, solicitud: dict) -> dict:
 
     parametros = dict(agente["parametros"])
     forzar = parametros.pop("forzar", False)
+    forzar_parametros = agente.get("forzar_parametros", [])
 
     for clave, valor in parametros.items():
-        if forzar or payload.get(clave) is None:
+        if forzar or clave in forzar_parametros or payload.get(clave) is None:
             payload[clave] = valor
 
     return payload

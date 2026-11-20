@@ -1,0 +1,42 @@
+# Perfil de mayor calidad; el contexto inicial se limita para la RX 6600 XT de 8 GiB.
+id: desarrollador-qwen3.5-9b
+nombre: Agente Desarrollador Qwen3.5 9B
+descripcion: Asistente de desarrollo con Qwen3.5 9B y contexto moderado para equipos con 8 GiB de VRAM.
+
+modelo: Qwen3.5-9B-Q4_K_M
+
+perfil_prompt: desarrollo
+
+system_prompt: |
+  En tareas amplias, lee por bloques pertinentes y resume lo aprendido; avisa si el contexto se
+  aproxima al límite.
+
+parametros:
+  # Muestreo oficial de Qwen3.5 para tareas de programación con razonamiento.
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 8192
+  # Limita cada bloque de razonamiento, sin cambiar el límite de salida.
+  reasoning_budget_tokens: 1024
+  forzar: false
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  repeat_penalty: 1.0
+
+forzar_parametros: [reasoning_budget_tokens]
+
+motor:
+  # El modelo admite 262144 tokens; 16384 mantiene un contexto moderado en la RX 6600 XT.
+  ctx_size: 16384
+  batch_size: 512
+  ubatch_size: 256
+  # El binario elige cuántas capas caben en GPU y deja 1 GiB de margen.
+  gpu_layers: "auto"
+  threads: 4
+  extra_args: ["--threads-batch", "6", "--load-mode", "mlock", "--fit", "on", "--fit-target", "1024"]
+  parallel: 1
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+  flash_attn: "on"
+  ngram_mod: false

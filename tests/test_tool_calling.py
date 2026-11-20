@@ -195,7 +195,8 @@ class ToolCallingTests(unittest.IsolatedAsyncioTestCase):
             herramienta["function"]["name"] for herramienta in payload["tools"]
         ])
         main._inyectar_herramientas(payload, {}, codigo=True)
-        self.assertIn("solo cuando el usuario solicite", payload["messages"][-1]["content"])
+        self.assertIn("solo cuando el usuario lo pide", payload["messages"][-1]["content"])
+        self.assertIn("pide autorizacion antes de indexar", payload["messages"][-1]["content"])
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as cliente:
             with patch(

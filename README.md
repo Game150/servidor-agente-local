@@ -245,11 +245,11 @@ En Cline abre **MCP Servers > Configure > Configure MCP Servers** y añade una e
 
 El MCP toma `EMBEDDINGS_MODEL` y `API_KEY` del `.env` de este servidor. Por defecto llama a `http://127.0.0.1:8000`; si la API escucha en otra dirección, añade `MCP_API_URL` a `env` y reinicia el MCP. Para modelos que requieren prefijos de tarea, como Nomic Embed, añade `"MCP_DOCUMENT_PREFIX": "search_document:"` y `"MCP_QUERY_PREFIX": "search_query:"` a `env` antes de indexar. Usa los prefijos indicados por el modelo que elegiste.
 
-Pide a Cline que ejecute `indexar_proyecto` para crear o actualizar el índice, y luego `buscar_codigo` con una consulta en lenguaje natural. Por ejemplo: «Indexa el proyecto y busca dónde se valida el inicio de sesión».
+Si el índice no existe, pide explícitamente a Cline que ejecute `indexar_proyecto`; luego usa `buscar_codigo` con una consulta en lenguaje natural. Para cambios posteriores, solicita actualizar el índice. Por ejemplo: «Indexa el proyecto y busca dónde se valida el inicio de sesión».
 
 Al indexar, el MCP divide el texto en fragmentos de hasta 1000 caracteres y solicita un vector para cada uno. Al buscar, convierte la consulta en otro vector y compara su similitud con los guardados. También busca términos en el texto y las rutas de archivo mediante SQLite FTS5 y combina ambos rankings con Reciprocal Rank Fusion (RRF), sin sumar sus puntuaciones. Devuelve por defecto tres fragmentos, con ruta, líneas y texto; `limite` acepta de uno a cinco resultados. La propiedad `similitud` sigue siendo la puntuación vectorial; el orden final usa RRF. La consulta admite hasta 1000 caracteres y SQLite debe incluir FTS5. Al abrir por primera vez un índice previo, el índice textual se crea desde los fragmentos existentes, sin recalcular ni borrar sus vectores. El texto y las líneas corresponden a la última indexación, no necesariamente al estado actual del archivo.
 
-Para recuperar contexto alrededor de un resultado, usa la herramienta MCP `leer_lineas` con `ruta` (la ruta relativa devuelta por la búsqueda), `linea` (número inicial, desde 1) y `margen` (líneas a cada lado; predeterminado 5, máximo 20). Por ejemplo: `leer_lineas(ruta="app/main.py", linea=120, margen=5)`. Solo permite leer archivos del índice que sigan dentro del workspace; rechaza rutas fuera del proyecto y archivos no indexados. Devuelve la ruta, el rango, el contenido y si se truncó. Limita la salida a 41 líneas y 8.000 caracteres.
+Para recuperar contexto alrededor de un resultado, usa la herramienta MCP `leer_lineas` con `ruta` (la ruta relativa devuelta por la búsqueda), `linea` (número inicial, desde 1) y `margen` (líneas a cada lado; predeterminado 5, máximo 30). Por ejemplo: `leer_lineas(ruta="app/main.py", linea=120, margen=5)`. Solo permite leer archivos del índice que sigan dentro del workspace; rechaza rutas fuera del proyecto y archivos no indexados. Devuelve la ruta, el rango, el contenido y si se truncó. Limita la salida a 61 líneas y 8.000 caracteres.
 
 La indexación posterior reutiliza los vectores de archivos sin cambios y elimina los archivos ya no presentes. No hay observador automático: vuelve a indexar cuando cambie el código. Si cambia el nombre del modelo o los prefijos, vuelve a indexar; si sustituyes el GGUF por otro con el mismo nombre, solicita `indexar_proyecto` con `reconstruir=true`. Si falla la generación de embeddings durante una actualización, se conserva el índice anterior.
 
@@ -262,7 +262,7 @@ La API puede ofrecer `indexar_proyecto` y `buscar_codigo` como herramientas inte
 
 Al iniciar, la API registra si la búsqueda está habilitada y, si lo está, el workspace configurado, el directorio del índice y el modelo de embeddings. Al empezar una indexación vuelve a registrar el workspace y la ruta del índice; así puedes confirmar en el log qué proyecto está usando.
 
-Pide al agente que **indexe o actualice explícitamente el proyecto**. La herramienta `indexar_proyecto` inicia el motor local de embeddings si hace falta y crea o actualiza el índice en `LOG_DIR/indices/`; luego puedes pedir búsquedas semánticas con `buscar_codigo`. No se indexa automáticamente al buscar. La indexación usa los archivos Git del workspace y las mismas exclusiones descritas arriba; `.env` se excluye.
+Pide al agente que **indexe o actualice explícitamente el proyecto**. La herramienta `indexar_proyecto` inicia el motor local de embeddings si hace falta y crea o actualiza el índice en `LOG_DIR/indices/`; luego puedes pedir búsquedas semánticas con `buscar_codigo`. No se indexa automáticamente al buscar. Si una búsqueda indica que falta el índice o está desactualizado, el agente debe explicarlo y pedir autorización antes de indexar. La indexación usa los archivos Git del workspace y las mismas exclusiones descritas arriba; `.env` se excluye.
 
 Los prefijos opcionales se configuran con `CODE_SEARCH_DOCUMENT_PREFIX` y `CODE_SEARCH_QUERY_PREFIX` y deben coincidir con los que requiere el modelo. Para una indexación incremental normal no hace falta reconstruir. Solicita `reconstruir=true` solo si necesitas regenerar todos los vectores, por ejemplo tras sustituir el GGUF conservando el mismo nombre.
 
@@ -380,7 +380,7 @@ description: Revisa código y busca errores cuando el usuario pide una revisión
 Comprueba el comportamiento y explica los problemas encontrados con evidencia.
 ```
 
-El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo, justo antes de la última pregunta del usuario, la lista de herramientas disponibles: `buscar_en_web` si está habilitada y el nombre con la descripción de cada skill. El modelo analiza la petición y, si una skill coincide claramente con la tarea principal, debe cargarla con `cargar_skill` antes de usar otras herramientas. Si ninguna coincide, puede continuar sin cargar una. También puedes pedir una skill por nombre, aunque la selección automática depende del modelo y de su soporte para tool calling.
+El nombre debe usar letras minúsculas, números o guiones, sin guiones consecutivos ni al principio o final. La descripción es obligatoria. El servidor lee la configuración en cada solicitud y muestra al modelo las skills disponibles y las herramientas internas habilitadas; las herramientas aportadas por el cliente se conservan según sus propios nombres y esquemas. El modelo debe usar solo herramientas efectivamente listadas y no asumir acceso a archivos, terminal o MCP si no se ofrece. Una skill aporta instrucciones, pero no concede herramientas ni permisos. Si una skill coincide claramente con la tarea principal, debe cargarla con `cargar_skill` antes de usar otras herramientas; si ninguna coincide, puede continuar sin cargar una. También puedes pedir una skill por nombre, aunque la selección automática depende del modelo y de su soporte para tool calling.
 
 Para no depender del modelo, el frontmatter acepta `triggers`, una lista opcional de prefijos de palabra (sin importar mayúsculas ni acentos), por ejemplo `triggers: [revis, "code review"]`. Si la petición del usuario (en Cline, el contenido de `<task>`) coincide con los triggers de una única skill, el servidor carga sus instrucciones directamente y lo registra como «seleccion automatica». Con empate o sin coincidencias, decide el modelo.
 
@@ -432,6 +432,8 @@ Git ignora las skills locales agregadas dentro de `skills/`; el archivo de ejemp
 
 El contexto es el espacio disponible para la entrada y la generación del modelo. Los mensajes, el archivo adjunto que el cliente envíe, las instrucciones del agente y los resultados de herramientas pueden ocupar parte de ese espacio. Los tokens de salida pueden incluir razonamiento, no solo el texto visible.
 
+`reasoning_budget_tokens` limita cada bloque de razonamiento cuando la plantilla del modelo expone sus marcadores; no limita toda la salida, que sigue regida por `max_tokens`. `forzar_parametros` permite fijar selectivamente un parámetro sin impedir que el cliente ajuste el resto; `forzar: true` sigue fijándolos todos. Los agentes Qwen3.5 usan 1024 (9B) y 2048 (4B Pro); Gemma 4 E4B usa 2048 para conservar margen en tareas con documentos e imágenes. El agente Qwen2.5-Coder no fija este parámetro porque su plantilla no usa el bloque de razonamiento compatible. Estos límites son topes por bloque, pueden recortar razonamiento útil y no evitan necesariamente que el cliente compacte la conversación.
+
 ### Avisos en la respuesta
 
 Al finalizar una respuesta de texto, la API puede añadir un aviso cuando el consumo informado por llama.cpp alcanza el **80 %** del contexto por slot, o un aviso más urgente desde el **95 %**. Funciona con y sin streaming. Por ejemplo:
@@ -461,6 +463,32 @@ Si una respuesta queda cortada, consulta el motivo y prueba pedir una respuesta 
 ## Configura otro agente o modelo
 
 Los agentes son archivos YAML dentro de `config/agentes/`. El campo `id` es el nombre que envía el cliente como `model`; el campo `modelo` debe coincidir con el nombre de un archivo `.gguf` dentro de `MODELS_DIR`, sin la extensión.
+
+La [plantilla completa de agente](./config/agentes/ejemplo.yaml.example) muestra
+los campos opcionales, sus valores y los ajustes del motor. No termina en `.yaml`
+ni `.yml`, así que no se carga como agente. Copiala a un archivo `.yaml` nuevo
+y reemplaza el ID, el modelo y las opciones según el GGUF y el uso previsto.
+
+Perfiles de modelos recientes disponibles:
+
+| ID del agente | Modelo | Contexto configurado |
+|---|---|---:|
+| `desarrollador-pro` | Qwen3.5 4B | 131072 |
+| `desarrollador-qwen3.5-9b` | Qwen3.5 9B | 16384 |
+| `trabajo-gemma-4-e4b` | Gemma 4 E4B | 32768 |
+
+Qwen3.5 admite hasta 262144 tokens y Gemma 4 E4B hasta 131072; los contextos
+menores de estos perfiles son límites iniciales para contener el uso de memoria,
+no límites nativos de los modelos. El perfil 9B usa un contexto y batches más
+moderados para la RX 6600 XT de 8 GiB; su consumo y rendimiento reales no se han
+medido en este perfil. Los YAML activos usan `gpu_layers: "auto"` y
+`--fit-target 1024` para que llama.cpp ajuste el offload y reserve 1 GiB por
+dispositivo; las capas que no quepan en VRAM pueden ejecutarse en CPU. Para
+tareas de programación, el sampler Qwen sigue los valores recomendados por
+Qwen3.5: `temperature: 0.6`, `top_p: 0.95`,
+`top_k: 20`, `min_p: 0.0`, `presence_penalty: 0.0` y `repeat_penalty: 1.0`.
+Gemma usa sus valores recomendados: temperatura 1.0, `top_p: 0.95` y
+`top_k: 64`.
 
 Ejemplo mínimo:
 
@@ -596,7 +624,8 @@ Los parámetros del bloque `motor` permiten ajustar el uso de recursos:
 - `ctx_size`: tamaño del contexto. Aumentarlo consume más memoria.
 - `batch_size`: tamaño máximo lógico del lote de procesamiento del prompt, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, añade `batch_size: 2048` bajo `motor`. Si se omite, se usa el valor predeterminado de llama.cpp. No es el tamaño de microbatch físico (`--ubatch-size`); aumentar el lote no garantiza mayor velocidad y puede requerir más memoria. Al cambiarlo se reinicia el motor en la siguiente solicitud.
 - `ubatch_size`: tamaño máximo del microbatch físico, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, `ubatch_size: 512`. Si se omite, se usa el valor predeterminado de llama.cpp. Conviene mantenerlo igual o menor que `batch_size`; un valor mayor puede consumir más memoria y no garantiza mayor velocidad. Al cambiarlo se reinicia el motor en la siguiente solicitud. No lo declares también mediante `extra_args`, para evitar argumentos duplicados.
-- `gpu_layers`: cantidad de capas que llama.cpp intenta ejecutar en la GPU. `99` intenta descargar tantas como sea posible.
+- `gpu_layers`: cantidad máxima de capas que llama.cpp intenta ejecutar en la GPU. `99` solicita tantas como sea posible; `"auto"` deja que el binario seleccione cuántas descargar según la memoria disponible.
+- Los agentes activos usan `gpu_layers: "auto"` y `--fit-target 1024` para reservar 1 GiB por dispositivo. Si no alcanza la VRAM, algunas capas pueden ejecutarse en CPU; eso puede reducir la velocidad, pero evita fijar manualmente un número de capas para una tarjeta concreta. Los contextos y batches de cada perfil siguen siendo límites explícitos.
 - `parallel`: cantidad de solicitudes que el motor puede atender en paralelo; más paralelismo puede consumir más memoria y reducir el contexto disponible por solicitud.
 - Los agentes incluidos usan `--load-mode mlock` en `motor.extra_args`: desactiva `mmap` y solicita mantener los pesos del modelo en RAM sin que el sistema los pagine o comprima. El sistema operativo puede limitar el bloqueo de memoria; si no puede bloquear suficientes páginas, el inicio puede fallar. No implica por sí mismo mayor velocidad de generación.
 

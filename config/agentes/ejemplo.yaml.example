@@ -1,0 +1,62 @@
+# Plantilla de referencia completa. No se carga como agente porque termina en
+# .example; copia a un archivo .yaml nuevo y reemplaza los valores de ejemplo.
+
+# Obligatorios: el id debe ser unico; modelo es el nombre del GGUF sin extension.
+id: mi-agente
+nombre: Mi agente
+descripcion: Describe brevemente para que sirve este agente.
+modelo: nombre-del-modelo-gguf
+
+# Opcionales: perfiles disponibles: desarrollo, trabajo.
+perfil_prompt: desarrollo
+system_prompt: |
+  Instrucciones especificas de este agente.
+
+parametros:
+  # Parametros de muestreo enviados a llama-server.
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 4096
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  frequency_penalty: 0.0
+  repeat_penalty: 1.0
+
+  # Opcional y dependiente de la plantilla del modelo: -1 deja el valor por
+  # defecto del servidor; 0 cierra el bloque de pensamiento de inmediato.
+  reasoning_budget_tokens: 1024
+
+  # true fuerza todos los parametros anteriores frente a valores del cliente.
+  # Si es false, el cliente puede sobrescribirlos.
+  forzar: false
+
+# Fuerza solo los nombres indicados en parametros. No incluir "forzar".
+# Util para fijar el presupuesto de razonamiento y dejar max_tokens ajustable.
+forzar_parametros: [reasoning_budget_tokens]
+
+motor:
+  # Contexto total del servidor (minimo 256); se reparte entre parallel slots.
+  ctx_size: 8192
+  # maximo de lote logico/fisico; null usa el valor por defecto de llama.cpp.
+  batch_size: 1024
+  ubatch_size: 512
+  # Capas GPU: entero >= -1 o "auto".
+  gpu_layers: "auto"
+  # Solicitudes paralelas; reduce el contexto disponible por solicitud.
+  parallel: 1
+  cache_type_k: q8_0
+  cache_type_v: q8_0
+  # Valores: null, "on", "off", "auto". Deben ir entre comillas.
+  flash_attn: "auto"
+  # Hilos CPU; null usa el valor por defecto.
+  threads: 4
+  # Argumentos adicionales de llama-server, cada opcion/valor como elemento.
+  # Para vision agrega, por ejemplo: ["--mmproj", "proyectores/mmproj-F16.gguf"].
+  extra_args: []
+
+  # Decodificacion especulativa ngram-mod; desactivada por defecto.
+  ngram_mod: false
+  ngram_mod_n_match: 24
+  ngram_mod_n_min: 48
+  ngram_mod_n_max: 64

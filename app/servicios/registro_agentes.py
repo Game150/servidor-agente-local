@@ -4,7 +4,9 @@ from app.nucleo.config import AGENTS_DIR
 from app.servicios.prompts import PERFILES_PROMPT
 
 CAMPOS_TEXTO = ("id", "nombre", "descripcion", "modelo")
-CAMPOS_PERMITIDOS = {*CAMPOS_TEXTO, "system_prompt", "perfil_prompt", "parametros", "motor"}
+CAMPOS_PERMITIDOS = {
+    *CAMPOS_TEXTO, "system_prompt", "perfil_prompt", "parametros", "forzar_parametros", "motor"
+}
 
 # Parámetros de muestreo por defecto. Cualquier otro parámetro que acepte
 # llama-server (top_k, min_p, repeat_penalty...) también puede ponerse en el
@@ -71,6 +73,12 @@ def _validar_parametros(bruto, archivo: str) -> dict:
     if not _es_entero(parametros["max_tokens"]) or parametros["max_tokens"] < 1:
         raise _fallo(archivo, "parametros.max_tokens debe ser un entero >= 1")
 
+    if "reasoning_budget_tokens" in parametros and (
+        not _es_entero(parametros["reasoning_budget_tokens"])
+        or parametros["reasoning_budget_tokens"] < -1
+    ):
+        raise _fallo(archivo, "parametros.reasoning_budget_tokens debe ser un entero >= -1")
+
     if not isinstance(parametros["forzar"], bool):
         raise _fallo(archivo, "parametros.forzar debe ser true o false")
 
@@ -108,8 +116,10 @@ def _validar_motor(bruto, archivo: str) -> dict:
     ):
         raise _fallo(archivo, "motor.ubatch_size debe ser un entero >= 1")
 
-    if not _es_entero(motor["gpu_layers"]) or motor["gpu_layers"] < -1:
-        raise _fallo(archivo, "motor.gpu_layers debe ser un entero >= -1")
+    if motor["gpu_layers"] != "auto" and (
+        not _es_entero(motor["gpu_layers"]) or motor["gpu_layers"] < -1
+    ):
+        raise _fallo(archivo, "motor.gpu_layers debe ser un entero >= -1 o 'auto'")
 
     if not _es_entero(motor["parallel"]) or motor["parallel"] < 1:
         raise _fallo(archivo, "motor.parallel debe ser un entero >= 1")
@@ -202,11 +212,28 @@ def _validar_agente(bruto, archivo: str) -> dict:
             "'perfil_prompt' debe ser uno de: " + ", ".join(sorted(PERFILES_PROMPT)),
         )
 
+    parametros = _validar_parametros(bruto.get("parametros"), archivo)
+    forzar_parametros = bruto.get("forzar_parametros", [])
+    parametros_configurables = set(parametros) - {"forzar"}
+    if (
+        not isinstance(forzar_parametros, list)
+        or any(
+            not isinstance(campo, str) or campo not in parametros_configurables
+            for campo in forzar_parametros
+        )
+        or len(set(forzar_parametros)) != len(forzar_parametros)
+    ):
+        raise _fallo(
+            archivo,
+            "'forzar_parametros' debe ser una lista de nombres distintos configurables en 'parametros'",
+        )
+
     return {
         **{campo: bruto[campo] for campo in CAMPOS_TEXTO},
         "system_prompt": system_prompt,
         "perfil_prompt": perfil_prompt,
-        "parametros": _validar_parametros(bruto.get("parametros"), archivo),
+        "parametros": parametros,
+        "forzar_parametros": forzar_parametros,
         "motor": _validar_motor(bruto.get("motor"), archivo),
     }
 

@@ -53,7 +53,7 @@ def _indice() -> IndiceCodigo:
 
 @mcp.tool()
 def indexar_proyecto(reconstruir: bool = False) -> dict:
-    """Actualiza el índice local del proyecto; reconstruir=true recalcula todos los vectores."""
+    """Crea o actualiza incrementalmente el índice si el usuario lo solicita; si falta o está desactualizado, explica y pide autorización. reconstruir=true recalcula todos los vectores."""
     inicio = time.monotonic()
     logger.info("indexar_proyecto: inicio reconstruir=%s", reconstruir)
     try:
@@ -71,7 +71,7 @@ def indexar_proyecto(reconstruir: bool = False) -> dict:
 
 @mcp.tool()
 def buscar_codigo(consulta: str, limite: int = 3) -> list[dict]:
-    """Busca por significado y texto, y devuelve hasta cinco fragmentos indexados."""
+    """Busca por significado y texto en el índice; devuelve hasta limite resultados (predeterminado 3, máximo 5). Confirma los fragmentos en la fuente actual."""
     inicio = time.monotonic()
     try:
         resultados = _indice().buscar(consulta, limite)
@@ -92,7 +92,7 @@ def buscar_codigo(consulta: str, limite: int = 3) -> list[dict]:
 
 @mcp.tool()
 def leer_lineas(ruta: str, linea: int, margen: int = 5) -> dict:
-    """Lee un rango acotado alrededor de una línea de un archivo indexado."""
+    """Lee un archivo indexado: ruta relativa, línea desde 1 y margen 0-30 (predeterminado 5); devuelve hasta 61 líneas y 8000 caracteres."""
     inicio = time.monotonic()
     try:
         resultado = _indice().leer_lineas(ruta, linea, margen)

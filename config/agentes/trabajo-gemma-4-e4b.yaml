@@ -1,29 +1,38 @@
 # Rol: trabajo.
 id: trabajo-gemma-4-e4b
 nombre: Agente de Trabajo Gemma 4 E4B
-descripcion: Asistente para hojas de cálculo, documentación, organización e investigación.
+descripcion: Asistente multimodal para hojas de cálculo, documentación, organización e investigación.
 
-modelo: gemma-4-E4B-it-UD-Q2_K_XL
+# Nombre del archivo .gguf en MODELS_DIR (sin extensión)
+modelo: gemma-4-E4B-it-UD-Q4_K_XL
 
 perfil_prompt: trabajo
 
 parametros:
-  # Gemma recomienda temperatura 1.0; se baja para que fórmulas y datos sean más estables.
-  temperature: 0.5
+  # Valores oficiales incrustados en los metadatos del GGUF de Gemma 4 E4B
+  temperature: 1.0
   top_p: 0.95
   max_tokens: 8192
   forzar: false
+  # Gemma 4 usa un bloque de pensamiento propio; 2048 permite tareas con imágenes/documentos.
+  reasoning_budget_tokens: 2048
   top_k: 64
   min_p: 0.0
 
+forzar_parametros: [reasoning_budget_tokens]
+
 motor:
+  # 32768 limita la caché; el ajuste automático puede descargar capas a CPU para dejar VRAM libre.
   ctx_size: 32768
-  batch_size: 256
-  ubatch_size: 256
-  gpu_layers: 99
+  # Según tu tabla de benchmarks en RX 6600 XT, 1024/512 da prácticamente el pico máximo (~571 tk/s)
+  batch_size: 1024
+  ubatch_size: 512
+  gpu_layers: "auto"
   threads: 6
-  extra_args: ["--threads-batch", "6", "--mmproj", "proyectores/mmproj-F16.gguf", "--load-mode", "mlock"]
+  # Mantiene la convención de tu proyecto (--load-mode mlock y el proyector en proyectores/)
+  extra_args: ["--threads-batch", "6", "--mmproj", "proyectores/mmproj-F16.gguf", "--load-mode", "mlock", "--fit", "on", "--fit-target", "1024"]
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0
   flash_attn: "auto"
+  ngram_mod: false

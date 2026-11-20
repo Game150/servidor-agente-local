@@ -278,16 +278,16 @@ class IndiceCodigoTests(unittest.TestCase):
             )
 
     def test_lee_lineas_acotadas_de_archivo_indexado(self):
-        texto = "\n".join(f"linea {numero}" for numero in range(1, 51)) + "\n"
+        texto = "\n".join(f"linea {numero}" for numero in range(1, 102)) + "\n"
         (self.proyecto / "lineas.py").write_text(texto, encoding="utf-8")
         (self.proyecto / "vacio.py").write_text("", encoding="utf-8")
         with patch.object(self.indice, "_embedding", side_effect=self.vector):
             self.indice.indexar()
 
         inicial = self.indice.leer_lineas("lineas.py", 1, margen=2)
-        final = self.indice.leer_lineas("lineas.py", 50, margen=2)
+        final = self.indice.leer_lineas("lineas.py", 101, margen=2)
         self.assertEqual((inicial["linea_inicio"], inicial["linea_fin"]), (1, 3))
-        self.assertEqual((final["linea_inicio"], final["linea_fin"]), (48, 50))
+        self.assertEqual((final["linea_inicio"], final["linea_fin"]), (99, 101))
         resultado = self.indice.leer_lineas("lineas.py", 25, margen=2)
         self.assertEqual(
             (resultado["ruta"], resultado["linea_inicio"], resultado["linea_fin"]),
@@ -295,8 +295,12 @@ class IndiceCodigoTests(unittest.TestCase):
         )
         self.assertEqual(resultado["contenido"], "\n".join(f"linea {n}" for n in range(23, 28)))
         self.assertFalse(resultado["truncado"])
-        maximo = self.indice.leer_lineas("lineas.py", 25, margen=20)
-        self.assertEqual(maximo["linea_fin"] - maximo["linea_inicio"] + 1, 41)
+        maximo = self.indice.leer_lineas("lineas.py", 50, margen=30)
+        self.assertEqual(
+            (maximo["linea_inicio"], maximo["linea_fin"]),
+            (20, 80),
+        )
+        self.assertEqual(maximo["linea_fin"] - maximo["linea_inicio"] + 1, 61)
         with self.assertRaises(ValueError):
             self.indice.leer_lineas("vacio.py", 1)
 
@@ -312,7 +316,7 @@ class IndiceCodigoTests(unittest.TestCase):
                 self.indice.leer_lineas(ruta, 1)
         with self.assertRaises(FileNotFoundError):
             self.indice.leer_lineas("inexistente.py", 1)
-        for linea, margen in ((0, 0), (True, 0), (1, -1), (1, 21), (1, True)):
+        for linea, margen in ((0, 0), (True, 0), (1, -1), (1, 31), (1, True)):
             with self.subTest(linea=linea, margen=margen), self.assertRaises(ValueError):
                 self.indice.leer_lineas("visible.py", linea, margen)
         with self.assertRaises(ValueError):

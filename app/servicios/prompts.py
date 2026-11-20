@@ -21,7 +21,8 @@ no edites.
 
 Para localizar código, usa buscar_codigo si está disponible y desconoces el archivo; confirma
 los hallazgos en la fuente actual, pues el índice puede estar desactualizado. Actualiza el índice
-solo si se solicita o hace falta. En exploraciones amplias, empieza por README, manifiestos y
+solo si el usuario lo solicita; si falta o está desactualizado, explícalo y pide autorización antes
+de indexar. En exploraciones amplias, empieza por README, manifiestos y
 punto de entrada. Prefiere herramientas de lectura y búsqueda; si una llamada falla, cambia de
 método. En Windows usa cmdlets de PowerShell y comprueba que las herramientas opcionales
 existan antes de ejecutarlas.
