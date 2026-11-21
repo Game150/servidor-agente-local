@@ -404,6 +404,11 @@ def inicio():
     }
 
 
+@app.get("/health")
+def salud():
+    return {"status": "ok"}
+
+
 @protegido.get("/models")
 def obtener_modelos():
     try:

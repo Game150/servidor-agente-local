@@ -45,6 +45,19 @@ class OpenAICompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(respuesta.json()["data"][0]["context_length"], 4096)
         self.assertEqual(respuesta.json()["data"][0]["max_tokens"], 256)
 
+    async def test_health_is_available_without_api_key(self):
+        main.app.dependency_overrides.pop(main.verificar_clave, None)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://testserver",
+        ) as cliente:
+            with patch("app.main.API_KEY", "local-test-key"):
+                respuesta = await cliente.get("/health")
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.json(), {"status": "ok"})
+
     async def test_models_lists_embeddings_model_when_configured(self):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=main.app),

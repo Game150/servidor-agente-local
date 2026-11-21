@@ -81,7 +81,7 @@ SEARXNG_URL=http://127.0.0.1:8888
 - `LLAMA_SERVER_PATH`: opcional. Déjalo vacío si el ejecutable está dentro de una carpeta `llama*` del proyecto o en el `PATH`.
 - `LLAMA_BACKEND`: `auto` (predeterminado) conserva el comportamiento actual y elige la compilación más reciente del proyecto; `vulkan` o `rocm` eligen la más reciente cuya carpeta `llama*` incluya ese nombre. Esta selección requiere que la carpeta identifique el backend. `LLAMA_SERVER_PATH`, si está definido, tiene prioridad y permite elegir un ejecutable o una carpeta concreta.
 - `LLAMA_HOST` y `LLAMA_PORT`: dirección interna de llama.cpp. Déjalos como están salvo que necesites cambiarla.
-- `API_KEY`: opcional para uso local. Si la defines, todos los endpoints salvo `/` requieren el encabezado `Authorization: Bearer TU_CLAVE`. Usa una clave propia y no compartas ni subas `.env`.
+- `API_KEY`: opcional para uso local. Si la defines, todos los endpoints salvo `/` y `/health` requieren el encabezado `Authorization: Bearer TU_CLAVE`. Usa una clave propia y no compartas ni subas `.env`.
 - `SEARXNG_URL`: dirección base de tu instancia SearXNG, sin `/search`. El valor mostrado arriba es un **ejemplo** para una instancia en el mismo equipo; debes añadirlo o descomentarlo en `.env` y ajustarlo. Si no lo defines, el código usa `http://192.168.10.254:8888`, una dirección de red local que probablemente no corresponda a tu instalación.
 
 El servidor y llama.cpp escuchan en `127.0.0.1` por defecto; así solo aceptan conexiones locales.
@@ -477,7 +477,7 @@ Perfiles de modelos recientes disponibles:
 | ID del agente | Modelo | Contexto configurado |
 |---|---|---:|
 | `desarrollador-pro` | Qwen3.5 4B | 131072 |
-| `desarrollador-qwen3.5-9b` | Qwen3.5 9B | 16384 |
+| `desarrollador-qwen3.5-9b` | Qwen3.5 9B | 24576 |
 | `trabajo-gemma-4-e4b` | Gemma 4 E4B | 32768 |
 
 Qwen3.5 admite hasta 262144 tokens y Gemma 4 E4B hasta 131072; los contextos
@@ -485,7 +485,7 @@ menores de estos perfiles son límites iniciales para contener el uso de memoria
 no límites nativos de los modelos. El perfil 9B usa un contexto y batches más
 moderados para la RX 6600 XT de 8 GiB; su consumo y rendimiento reales no se han
 medido en este perfil. Los YAML activos usan `gpu_layers: "auto"` y
-`--fit-target 1024` para que llama.cpp ajuste el offload y reserve 1 GiB por
+`--fit-target 512` para que llama.cpp ajuste el offload y reserve 512 MiB por
 dispositivo; las capas que no quepan en VRAM pueden ejecutarse en CPU. Para
 tareas de programación, el sampler Qwen sigue los valores recomendados por
 Qwen3.5: `temperature: 0.6`, `top_p: 0.95`,
@@ -590,6 +590,7 @@ el formato ni que el modelo genere una respuesta con el proyector.
 | Método | Endpoint | Función |
 |---|---|---|
 | GET | `/` | Comprobar que la API está activa |
+| GET | `/health` | Comprobar disponibilidad de la API (no verifica que haya un modelo cargado) |
 | GET | `/models` | Listar archivos GGUF disponibles |
 | GET | `/agents` | Listar agentes configurados |
 | GET | `/agents/{agent_id}` | Consultar la configuración de un agente |
@@ -600,7 +601,7 @@ el formato ni que el modelo genere una respuesta con el proyector.
 | POST | `/engine/stop` | Detener el modelo activo |
 | POST | `/v1/chat/completions` | Generar una respuesta; admite streaming |
 
-Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicitudes, excepto a `GET /`.
+Si configuraste `API_KEY`, agrega `Authorization: Bearer TU_CLAVE` a las solicitudes, excepto a `GET /` y `GET /health`.
 
 `POST /engine/stop` espera a que terminen las respuestas activas antes de detener el motor. Mientras espera, las nuevas solicitudes de chat esperan a su vez; después pueden volver a iniciar el motor.
 
@@ -628,9 +629,9 @@ Los parámetros del bloque `motor` permiten ajustar el uso de recursos:
 - `batch_size`: tamaño máximo lógico del lote de procesamiento del prompt, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, añade `batch_size: 2048` bajo `motor`. Si se omite, se usa el valor predeterminado de llama.cpp. No es el tamaño de microbatch físico (`--ubatch-size`); aumentar el lote no garantiza mayor velocidad y puede requerir más memoria. Al cambiarlo se reinicia el motor en la siguiente solicitud.
 - `ubatch_size`: tamaño máximo del microbatch físico, en tokens. Es opcional y debe ser un entero positivo; por ejemplo, `ubatch_size: 512`. Si se omite, se usa el valor predeterminado de llama.cpp. Conviene mantenerlo igual o menor que `batch_size`; un valor mayor puede consumir más memoria y no garantiza mayor velocidad. Al cambiarlo se reinicia el motor en la siguiente solicitud. No lo declares también mediante `extra_args`, para evitar argumentos duplicados.
 - `gpu_layers`: cantidad máxima de capas que llama.cpp intenta ejecutar en la GPU. `99` solicita tantas como sea posible; `"auto"` deja que el binario seleccione cuántas descargar según la memoria disponible.
-- Los agentes activos usan `gpu_layers: "auto"` y `--fit-target 1024` para reservar 1 GiB por dispositivo. Si no alcanza la VRAM, algunas capas pueden ejecutarse en CPU; eso puede reducir la velocidad, pero evita fijar manualmente un número de capas para una tarjeta concreta. Los contextos y batches de cada perfil siguen siendo límites explícitos.
+- Los agentes activos usan `gpu_layers: "auto"` y `--fit-target 512` para reservar 512 MiB por dispositivo. Si no alcanza la VRAM, algunas capas pueden ejecutarse en CPU; eso puede reducir la velocidad, pero evita fijar manualmente un número de capas para una tarjeta concreta. Los contextos y batches de cada perfil siguen siendo límites explícitos.
 - `parallel`: cantidad de solicitudes que el motor puede atender en paralelo; más paralelismo puede consumir más memoria y reducir el contexto disponible por solicitud.
-- Los agentes incluidos usan `--load-mode mlock` en `motor.extra_args`: desactiva `mmap` y solicita mantener los pesos del modelo en RAM sin que el sistema los pagine o comprima. El sistema operativo puede limitar el bloqueo de memoria; si no puede bloquear suficientes páginas, el inicio puede fallar. No implica por sí mismo mayor velocidad de generación.
+- Los agentes activos usan `--load-mode mmap` en `motor.extra_args`: accede a los pesos GGUF mediante memory mapping en lugar de bloquearlos en RAM con `mlock`. Esto no cambia el offload a GPU; lo determinan `gpu_layers` y la memoria disponible.
 
 Cambia un valor por vez y compara el resultado. No hay una configuración óptima universal: depende del modelo, su cuantización y el hardware.
 
