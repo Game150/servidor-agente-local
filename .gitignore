@@ -16,7 +16,7 @@ __pycache__/
 !/skills/explicar-codigo/SKILL.md
 
 # Binarios locales de llama.cpp
-llama-b12292-bin-win-vulkan-x64/
+llama-b12600-bin-win-vulkan-x64/
 llama-b1382-windows-rocm-gfx103X-x64/
 
 # Proyectores multimodales descargados

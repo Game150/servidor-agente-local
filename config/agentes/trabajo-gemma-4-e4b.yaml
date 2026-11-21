@@ -30,7 +30,7 @@ motor:
   gpu_layers: "auto"
   threads: 6
   # Mantiene la convención de tu proyecto (--load-mode mlock y el proyector en proyectores/)
-  extra_args: ["--threads-batch", "6", "--mmproj", "proyectores/mmproj-F16.gguf", "--load-mode", "mlock", "--fit", "on", "--fit-target", "1024"]
+  extra_args: ["--threads-batch", "6", "--mmproj", "proyectores/mmproj-F16.gguf", "--mmap", "--fit", "on", "--fit-target", "512"]
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0

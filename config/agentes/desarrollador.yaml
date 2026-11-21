@@ -25,7 +25,7 @@ motor:
   ubatch_size: 512
   gpu_layers: "auto"
   threads: 4
-  extra_args: ["--threads-batch", "6", "--load-mode", "mlock", "--fit", "on", "--fit-target", "1024"]
+  extra_args: ["--threads-batch", "6", "--mmap", "--fit", "on", "--fit-target", "512"]
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0

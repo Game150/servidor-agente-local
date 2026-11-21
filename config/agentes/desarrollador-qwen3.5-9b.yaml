@@ -28,13 +28,13 @@ forzar_parametros: [reasoning_budget_tokens]
 
 motor:
   # El modelo admite 262144 tokens; 16384 mantiene un contexto moderado en la RX 6600 XT.
-  ctx_size: 16384
+  ctx_size: 24576
   batch_size: 512
   ubatch_size: 256
   # El binario elige cuántas capas caben en GPU y deja 1 GiB de margen.
   gpu_layers: "auto"
   threads: 4
-  extra_args: ["--threads-batch", "6", "--load-mode", "mlock", "--fit", "on", "--fit-target", "1024"]
+  extra_args: ["--threads-batch", "6", "--mmap", "--fit", "on", "--fit-target", "512"]
   parallel: 1
   cache_type_k: q8_0
   cache_type_v: q8_0
